@@ -2,3 +2,4 @@ tensorflow
 numpy
 tfrt
 scipy
+pyvista
