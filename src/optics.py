@@ -286,6 +286,7 @@ class ParametricTriangleOptic(TriangleOptic):
         self.driver_indices = None
         self.full_params = False
         self._qt_compat = qt_compat
+        self._d_mat = None
         if qt_compat:
             self.parameters_updated = ParamsUpdatedSignal()
         else:
@@ -305,7 +306,7 @@ class ParametricTriangleOptic(TriangleOptic):
         else:
             self.from_mesh(mesh)
 
-    def from_mesh(self, mesh):
+    def from_mesh(self, mesh, initials=None):
         all_indices = np.arange(mesh.points.shape[0])
         available_indices = all_indices.copy()
         drivens_driver = {}
@@ -340,7 +341,8 @@ class ParametricTriangleOptic(TriangleOptic):
         else:
             driver_indices = available_indices
 
-        # At this point we should be guarenteed to have three sets of mutually exclusive indices:
+        # At this point we should be guarenteed to have three sets of mutually exclusive indices, that all index into
+        # mesh.points:
         # fixed_indices are all indices of vertices that will not be moved,
         # driver_indices are indices of vertices that will get an attached parameter
         # drivens_driver is a dict whose keys are indices of driven vertices and whose value is the index of the
@@ -390,6 +392,9 @@ class ParametricTriangleOptic(TriangleOptic):
             # Now need to construct the gather_params, a set of indices that can be used to gather from parameters to
             # zero points.
             self.gather_params = tf.constant([drivens_driver[key] for key in range(movable_count)], dtype=tf.int32)
+            self._foo = [reindex_driver[v] for v in self.driver_indices]
+        else:
+            self._foo = self.driver_indices
 
         if self.any_fixed:
             # Now need to construct gather_vertices, a set of indices that can be used to gather from
@@ -398,7 +403,10 @@ class ParametricTriangleOptic(TriangleOptic):
             self.gather_vertices = tf.constant(gather_vertices, dtype=tf.int32)
 
         # Make the final components of the surface.
-        self.initials = tf.zeros((param_count, 1), dtype=tf.float64)
+        if initials is None:
+            self.initials = tf.zeros((param_count, 1), dtype=tf.float64)
+        else:
+            self.initials = initials
         self.parameters = tf.Variable(self.initials)
         self.faces = tf.constant(mt.unpack_faces(mesh.faces), dtype=tf.int32)
         self.vectors = tf.constant(self.vector_generator(self.zero_points), dtype=tf.float64)
@@ -407,14 +415,16 @@ class ParametricTriangleOptic(TriangleOptic):
         self.try_mesh_tools()
 
     def try_mesh_tools(self):
+        vertices = self.get_vertices_from_params(tf.zeros_like(self.parameters))
         if self.enable_vum:
             self.vum = mt.cosine_vum(
                 tf.constant(self.settings.vum_origin, dtype=tf.float64),
-                self.vertices,
+                vertices,
                 self.faces
             )
         if self.enable_accumulator:
-            active_vertices = tf.gather(self.vertices, self.driver_indices, axis=0)
+            active_vertices = tf.gather(vertices, self.driver_indices, axis=0)
+
             self.accumulator = mt.cosine_acum(
                 tf.constant(self.settings.accumulator_origin, dtype=tf.float64),
                 active_vertices
@@ -427,20 +437,24 @@ class ParametricTriangleOptic(TriangleOptic):
             for constraint in self.constraints:
                 constraint(self)
 
-            if self.any_driven:
-                # If any vertices are driven, we need expand the parameters to match the shape of the zero points.
-                gathered_params = tf.gather(self.parameters, self.gather_params, axis=0)
-            else:
-                gathered_params = self.parameters
-            self.vertices = self.zero_points + gathered_params * self.vectors
+            self.vertices = self.get_vertices_from_params(self.parameters)
 
-            if self.any_fixed:
-                # If any vertices are fixed vertices, we need to add them in using gather_vertices
-                all_vertices = tf.concat((self.fixed_points, self.vertices), axis=0)
-                self.vertices = tf.gather(all_vertices, self.gather_vertices, axis=0)
-
-            first, second, third = self.process_vum(*self.get_points_from_vertices())
+            first, second, third = self.try_vum(*self.get_points_from_vertices())
             self.update_fields_from_points(first, second, third)  # COMPAT
+
+    def get_vertices_from_params(self, params):
+        if self.any_driven:
+            # If any vertices are driven, we need expand the parameters to match the shape of the zero points.
+            gathered_params = tf.gather(params, self.gather_params, axis=0)
+        else:
+            gathered_params = params
+        vertices = self.zero_points + gathered_params * self.vectors
+
+        if self.any_fixed:
+            # If any vertices are fixed vertices, we need to add them in using gather_vertices
+            all_vertices = tf.concat((self.fixed_points, vertices), axis=0)
+            vertices = tf.gather(all_vertices, self.gather_vertices, axis=0)
+        return vertices
 
     def constrain(self):
         if not self.frozen:
@@ -480,7 +494,7 @@ class ParametricTriangleOptic(TriangleOptic):
                 "with a reparametrizable optic instead."
             )
 
-    def process_vum(self, first_points, second_points, third_points):
+    def try_vum(self, first_points, second_points, third_points):
         if not self.enable_vum:
             return first_points, second_points, third_points
 
@@ -509,6 +523,24 @@ class ParametricTriangleOptic(TriangleOptic):
                 if self.accumulator is not None:
                     return tf.matmul(self.accumulator, delta)
         return delta
+
+    def make_d_mat(self):
+        vs = self.get_vertices_from_params(tf.zeros_like(self.parameters))
+        avs = tf.gather(vs, self.driver_indices, axis=0)
+
+        self._d_mat = tf.sqrt(tf.reduce_sum((avs[None, :, :] - avs[:, None, :]) ** 2, axis=-1))
+
+    def get_smoother(self, stddev):
+        if self._d_mat is None:
+            print(f"d mat does not exist, making...")
+            self.make_d_mat()
+        elif self._d_mat.shape != (self.parameters.shape[0], self.parameters.shape[0]):
+            print(f"d mat is wrong shape, making...")
+            self.make_d_mat()
+        return tf.exp(-.5 * (self._d_mat / stddev) ** 2)
+
+    def smooth(self, smoother):
+        self.param_assign(tf.matmul(smoother, self.parameters))
 
 
 class ParamsUpdatedSignal(qtc.QObject):

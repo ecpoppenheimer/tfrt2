@@ -468,6 +468,16 @@ class ParameterController(qtw.QWidget):
         except Exception:
             pass
 
+        # Make a smoother
+        self.component.settings.establish_defaults(smooth_stddev=.05)
+        main_layout.addWidget(SettingsEntryBox(
+            self.component.settings, "smooth_stddev", float, qtg.QDoubleValidator(1e-6, 1e6, 8), self.make_smoother
+        ), 7, 0, 8, 2)
+        self.make_smoother()
+        smooth_button = qtw.QPushButton("Test Smoother")
+        smooth_button.clicked.connect(self.test_smoother)
+        main_layout.addWidget(smooth_button, 8, 0, 9, 1)
+
         # optionally register a callback to update the parameters from the boundary.  This only works if the boundary
         # explicitly calls the signal
         try:
@@ -532,6 +542,12 @@ class ParameterController(qtw.QWidget):
             self.component.drawer.draw()
         except AttributeError:
             pass
+
+    def make_smoother(self):
+        print("make smoother")
+
+    def test_smoother(self):
+        print("test smoother")
 
 
 class OpticController(qtw.QWidget):

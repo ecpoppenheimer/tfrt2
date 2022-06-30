@@ -5,13 +5,13 @@ import pathlib
 
 import tfrt2.src.fancy_optics as fancy_optics
 import tfrt2.src.settings as settings
-import tfrt.boundaries as boundaries
 import tfrt.materials as materials
 import tfrt.sources as sources
 import tfrt.distributions as distributions
 import tfrt2.src.wavelength as wavelength
 import tfrt2.src.component_widgets as cpw
 import tfrt2.src.optics as optics
+import tfrt2.src.vector_generator as vg
 
 
 def get_system(client, path_to_self):
@@ -52,16 +52,16 @@ class Mk5System(fancy_optics.FancySystem):
 
         lens = optics.ParametricTriangleOptic(
             "exit_window",
-            boundaries.FromVectorVG((0.0, 0.0, 1.0)).generate,
+            vg.FromVectorVG((0.0, 0.0, 1.0)),
             self.client,
             path_to_self,
-            mesh=pv.Plane(i_resolution=10, j_resolution=10).triangulate(),
+            mesh=pv.Plane(i_resolution=9, j_resolution=9).triangulate(),
             settings=self.settings.lens,
             mat_in=1,
             mat_out=0,
-            filter_fixed=filter_fixed,
-            filter_drivers=filter_drivers,
-            attach_to_driver=attach_to_driver
+            #filter_fixed=filter_fixed,
+            #filter_drivers=filter_drivers,
+            #attach_to_driver=attach_to_driver
         )
         lens.update()
 
