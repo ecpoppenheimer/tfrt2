@@ -233,3 +233,7 @@ class FancySystem(engine.OpticalSystem3D):
                 if hasattr(component, "settings"):
                     self.settings.dict[key] = component.settings.dict
             self.settings.save(self.settings_path)
+
+    def get_source_rays(self):
+        got_rays = tf.concat([source.rays for source in self.source_parts], axis=0)
+        return got_rays

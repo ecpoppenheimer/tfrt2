@@ -2,10 +2,12 @@ import tensorflow as tf
 import pyvista as pv
 import numpy as np
 import PyQt5.QtCore as qtc
+import PyQt5.QtGui as qtg
 import PyQt5.QtWidgets as qtw
 
 import tfrt2.src.mesh_tools as mt
 import tfrt2.src.component_widgets as cw
+import tfrt2.src.drawing as drawing
 
 
 class TriangleOptic:
@@ -14,6 +16,8 @@ class TriangleOptic:
 
     Please note that vertices and faces are always assumed to be tensorflow tensors.
     """
+    dimension = 3
+
     def __init__(self, name, client, system_path, settings, mesh=None, mat_in=None, mat_out=None, hold_load=False):
         """
         Basic 3D Triangulated optical surface.
@@ -23,7 +27,16 @@ class TriangleOptic:
         It is the user's responsibility to feed and initialize the settings given to this object.  Omitting certain
         settings will suppress behavior in the component controller (can omit displaying IO for a technical surface,
         for instance).  Defaults will only be established by this class if explicitly stated in this documentation
-        (though please note that controllers can also establish defaults)
+        (though please note that controllers can also establish defaults).
+
+        In order to be compatible with the drawer and tracer, the following operations must be completed whenever the
+        mesh is updated.  These operations are not performed automatically because different more complicated
+        derivatives might need to do extra operations in between
+        1) Set the faces (usually done in from_mesh or some kind of remesh operation).
+        2) Set the vertices (The base class does it in from_mesh, but a parametric class will do this in update()).
+        3) Separate the vertices out by face by calling call gather_faces().  THIS MUST BE EXPLICITLY DONE IN UPDATE BY
+            CHILD CLASSES.
+        4) Compute the norm by calling compute_norm().  THIS MUST BE EXPLICITLY DONE IN UPDATE BY CHILD CLASSES.
 
         Parameters
         ----------
@@ -73,7 +86,8 @@ class TriangleOptic:
         self.vertices = None
         self.faces = None
         self.client = client
-        self._fields = {}  # COMPAT
+        self.face_vertices = None
+        self.norm = None
 
         if not hold_load:
             if mesh is None:
@@ -90,57 +104,48 @@ class TriangleOptic:
         self.as_mesh().save(out_path)
 
     def as_mesh(self):
-        return pv.PolyData(self.vertices.numpy(), mt.pack_faces(self.faces.numpy()))
+        try:
+            return pv.PolyData(self.vertices.numpy(), mt.pack_faces(self.faces.numpy()))
+        except Exception:
+            return pv.PolyData(np.array(self.vertices), mt.pack_faces(np.array(self.faces)))
 
     def from_mesh(self, mesh):
         self.vertices = tf.constant(mesh.points, dtype=tf.float64)
         self.faces = tf.constant(mt.unpack_faces(mesh.faces), dtype=tf.int32)
+        # Separate the vertices out by face
+        self.gather_faces()
+        # Compute the norm
+        self.compute_norm()
 
-    def update(self, force=False):
-        if not self.frozen or force:
-            self.update_fields_from_points(*self.get_points_from_vertices())
+    def gather_faces(self):
+        self.face_vertices = mt.points_from_faces(self.vertices, self.faces)
 
-    def get_points_from_vertices(self):
-        return mt.points_from_vertices(self.vertices, self.faces)
-
-    def update_fields_from_points(self, first_points, second_points, third_points):
-        """
-        Updates the fields from points.  COMPAT
-        """
-        self["xp"], self["yp"], self["zp"] = tf.unstack(first_points, axis=1)
-        self["x1"], self["y1"], self["z1"] = tf.unstack(second_points, axis=1)
-        self["x2"], self["y2"], self["z2"] = tf.unstack(third_points, axis=1)
-        self["norm"] = tf.linalg.normalize(
+    def compute_norm(self):
+        first_points, second_points, third_points = self.face_vertices
+        # This order follows the tfrt1 convention, but I am a little concerned that this is backwards - that it
+        # should be first-second instead.  I need to come back to this later once I start working on the tracer.  TODO
+        self.norm = tf.linalg.normalize(
             tf.linalg.cross(
                 second_points - first_points,
                 third_points - second_points
             ),
             axis=1)[0]
-        if self.mat_in is not None:
-            self["mat_in"] = tf.broadcast_to(self.mat_in, shape=self["xp"].shape)
-        if self.mat_out is not None:
-            self["mat_out"] = tf.broadcast_to(self.mat_out, shape=self["xp"].shape)
 
-    def __getitem__(self, key):
-        # COMPAT
-        return self._fields[key]
-
-    def __setitem__(self, key, value):
-        # COMPAT
-        self._fields[key] = value
-
-    def keys(self):
-        # COMPAT
-        return self._fields.keys()
-
-    @property
-    def dimension(self):
-        return 3
+    def update(self):
+        pass
 
 
 class ParametricTriangleOptic(TriangleOptic):
     """
     3D Triangulated parametric optic, with advanced features for use with gradient descent optimization.
+
+    Update adds some extra steps beyond the canonical ones for TriangleOptic:
+    1) Set the faces in from_mesh.  Only has to be done when the optic is rebuilt.
+    2) Apply constraints.
+    3) Set the vertices from the zero points, vectors, and parameters, via get_vertices_from_params()
+    4) Separate the vertices out by face via gather_faces()
+    5) Apply the vertex update map via try_vum()
+    4) Compute the norm via compute_norm().
     """
     def __init__(
         self,
@@ -287,6 +292,7 @@ class ParametricTriangleOptic(TriangleOptic):
         self.full_params = False
         self._qt_compat = qt_compat
         self._d_mat = None
+        self.movable_indices = None
         if qt_compat:
             self.parameters_updated = ParamsUpdatedSignal()
         else:
@@ -357,16 +363,16 @@ class ParametricTriangleOptic(TriangleOptic):
             self.full_params = True
         self.driver_indices = driver_indices
 
-        movable_indices = np.setdiff1d(np.arange(mesh.points.shape[0]), fixed_indices)
-        movable_count = len(movable_indices)
+        self.movable_indices = np.setdiff1d(np.arange(mesh.points.shape[0]), fixed_indices)
+        movable_count = len(self.movable_indices)
         param_count = len(driver_indices)
         self.fixed_points = tf.constant(mesh.points[fixed_indices], dtype=tf.float64)
-        self.zero_points = tf.constant(mesh.points[movable_indices], dtype=tf.float64)
+        self.zero_points = tf.constant(mesh.points[self.movable_indices], dtype=tf.float64)
 
         if self.any_driven:
             # Sanity check that every vertex in movable indices is a key in drivens_driver and that the set of values in
             # drivens_driver is equivalent to the set of driver indices
-            assert set(movable_indices) == set(drivens_driver.keys()), (
+            assert set(self.movable_indices) == set(drivens_driver.keys()), (
                 "ParametricTriangleOptic: movable_indices does not match the domain of the index map."
             )
             assert set(driver_indices) == set(drivens_driver.values()), (
@@ -377,7 +383,7 @@ class ParametricTriangleOptic(TriangleOptic):
             # we need to index relative to drivers and zero_points/movable.
             reindex_driven = {}
             count = 0
-            for m in movable_indices:
+            for m in self.movable_indices:
                 reindex_driven[m] = count
                 count += 1
 
@@ -399,7 +405,7 @@ class ParametricTriangleOptic(TriangleOptic):
         if self.any_fixed:
             # Now need to construct gather_vertices, a set of indices that can be used to gather from
             # the concatenation of fixed_points and zero_points (in that order) to the indices.
-            gather_vertices = np.argsort(np.concatenate((fixed_indices, movable_indices)))
+            gather_vertices = np.argsort(np.concatenate((fixed_indices, self.movable_indices)))
             self.gather_vertices = tf.constant(gather_vertices, dtype=tf.int32)
 
         # Make the final components of the surface.
@@ -411,7 +417,11 @@ class ParametricTriangleOptic(TriangleOptic):
         self.faces = tf.constant(mt.unpack_faces(mesh.faces), dtype=tf.int32)
         self.vectors = tf.constant(self.vector_generator(self.zero_points), dtype=tf.float64)
 
+        # Need to temporarily disable the vum so we can update so we can get the parts we need to make the new VUM.
+        enable_vum = self.enable_vum
+        self.enable_vum = False
         self.update()
+        self.enable_vum = enable_vum
         self.try_mesh_tools()
 
     def try_mesh_tools(self):
@@ -419,7 +429,8 @@ class ParametricTriangleOptic(TriangleOptic):
         if self.enable_vum:
             self.vum = mt.cosine_vum(
                 tf.constant(self.settings.vum_origin, dtype=tf.float64),
-                vertices,
+                self.face_vertices,
+                self.vertices,
                 self.faces
             )
         if self.enable_accumulator:
@@ -434,13 +445,19 @@ class ParametricTriangleOptic(TriangleOptic):
 
     def update(self, force=False):
         if not self.frozen or force:
+            # Apply constraints
             for constraint in self.constraints:
                 constraint(self)
 
+            # Faces is set in from_mesh.
+            # Compute the vertices, from the zero points and parameters
             self.vertices = self.get_vertices_from_params(self.parameters)
-
-            first, second, third = self.try_vum(*self.get_points_from_vertices())
-            self.update_fields_from_points(first, second, third)  # COMPAT
+            # Separate the vertices out by face
+            self.gather_faces()
+            # Try applying the vum on the separated vertices
+            self.face_vertices = self.try_vum(*self.face_vertices)
+            # Compute the norm
+            self.compute_norm()
 
     def get_vertices_from_params(self, params):
         if self.any_driven:
@@ -532,12 +549,16 @@ class ParametricTriangleOptic(TriangleOptic):
 
     def get_smoother(self, stddev):
         if self._d_mat is None:
-            print(f"d mat does not exist, making...")
             self.make_d_mat()
         elif self._d_mat.shape != (self.parameters.shape[0], self.parameters.shape[0]):
-            print(f"d mat is wrong shape, making...")
             self.make_d_mat()
-        return tf.exp(-.5 * (self._d_mat / stddev) ** 2)
+
+        # Gaussian smoother, which is a matrix that can be left-multiplied with parameters
+        smoother = tf.exp(-.5 * (self._d_mat / stddev) ** 2)
+        # Normalize, so that the average position of the surface is conserved.  I... am really unsure which axis
+        # we need to normalize over.
+        smoother /= tf.reduce_sum(smoother, axis=1)
+        return smoother
 
     def smooth(self, smoother):
         self.param_assign(tf.matmul(smoother, self.parameters))
@@ -546,3 +567,116 @@ class ParametricTriangleOptic(TriangleOptic):
 class ParamsUpdatedSignal(qtc.QObject):
     sig = qtc.pyqtSignal()
 
+
+class TrigBoundaryDisplayController(qtw.QWidget):
+    _valid_colors = set(pv.hexcolors.keys())
+
+    def __init__(self, component, plot):
+        super().__init__()
+        self.component = component
+        self._permit_draws = False
+        self._params_valid = hasattr(self.component, "parameters")
+
+        # define the default display settings for this component
+        if self._params_valid:
+            drawing_settings = self.component.settings.establish_defaults(
+                visible=True,
+                norm_arrow_visibility=False,
+                norm_arrow_length=0.1,
+                parameter_arrow_visibility=False,
+                parameter_arrow_length=0.1,
+                color="cyan",
+                show_edges=False
+            )
+        else:
+            drawing_settings = self.component.settings.establish_defaults(
+                visible=True,
+                norm_arrow_visibility=False,
+                norm_arrow_length=0.1,
+                color="cyan",
+                show_edges=False
+            )
+
+        self.drawer = drawing.TriangleDrawer(plot, component, **self.component.settings.get_subset(drawing_settings))
+        self.component.drawer = self.drawer
+
+        # build the UI elements
+        main_layout = qtw.QGridLayout()
+        self.setLayout(main_layout)
+
+        # visibility check box
+        self.build_check_box(main_layout, 0, "visible")
+
+        # color line edit
+        main_layout.addWidget(qtw.QLabel("color"), 1, 0)
+        color_widget = qtw.QLineEdit(self)
+        color_widget.setText(str(self.component.settings.color))
+        color_widget.editingFinished.connect(self.change_color)
+        main_layout.addWidget(color_widget, 1, 1)
+        self.color_widget = color_widget
+
+        # edges check box
+        self.build_check_box(main_layout, 2, "show_edges", self.drawer.rebuild)
+
+        # norm arrows controls
+        self.build_check_box(main_layout, 3, "norm_arrow_visibility")
+        self.build_entry_box(main_layout, 4, "norm_arrow_length", float, qtg.QDoubleValidator(0, 1e6, 5))
+
+        if self._params_valid:
+            self.build_check_box(main_layout, 5, "parameter_arrow_visibility")
+            self.build_entry_box(main_layout, 6, "parameter_arrow_length", float, qtg.QDoubleValidator(0, 1e6, 5))
+
+        self._permit_draws = True
+
+    def redraw(self):
+        if self._permit_draws:
+            self.drawer.draw()
+
+    def change_color(self):
+        color = self.color_widget.text()
+        if color in self._valid_colors:
+            self.component.settings.color = color
+            self.drawer.color = color
+            self.drawer.rebuild()
+            self.redraw()
+            self.color_widget.setStyleSheet("QLineEdit { background-color: white}")
+        else:
+            self.color_widget.setStyleSheet("QLineEdit { background-color: pink}")
+
+    def remove_drawer(self):
+        self.drawer.delete()
+
+    def build_check_box(self, main_layout, layout_index, name, extra_callback=None):
+        main_layout.addWidget(qtw.QLabel(str(name).replace("_", " ")), layout_index, 0)
+        widget = qtw.QCheckBox("")
+
+        def callback(state):
+            state = bool(state)
+            self.component.settings.dict[name] = state
+            setattr(self.drawer, name, state)
+            if extra_callback is not None:
+                extra_callback()
+            self.redraw()
+
+        widget.setCheckState(self.component.settings.dict[name])
+        callback(self.component.settings.dict[name])
+        widget.setTristate(False)
+        widget.stateChanged.connect(callback)
+        main_layout.addWidget(widget, layout_index, 1)
+
+    def build_entry_box(self, main_layout, layout_index, name, value_type, validator=None):
+        main_layout.addWidget(qtw.QLabel(name), layout_index, 0)
+        widget = qtw.QLineEdit(self)
+        if validator:
+            widget.setValidator(validator)
+
+        def callback():
+            value = value_type(widget.text())
+            self.component.settings.dict[name] = value
+            setattr(self.drawer, name, value)
+            self.redraw()
+
+        widget.setText(str(self.component.settings.dict[name]))
+        callback()
+        widget.editingFinished.connect(callback)
+        main_layout.addWidget(widget, layout_index, 1)

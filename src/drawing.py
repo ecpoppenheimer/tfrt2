@@ -36,10 +36,9 @@ class draw method does not redraw the mpl canvas.
 import numpy as np
 import matplotlib as mpl
 import pyvista as pv
-import tensorflow as tf
 
 import tfrt2.src.wavelength as wavelength
-from tfrt.boundaries import TriangleBoundaryBase
+import tfrt2.src.mesh_tools as mt
 
 
 class RayDrawer3D:
@@ -93,81 +92,43 @@ class RayDrawer3D:
     ):
 
         self.plot = plot
-        self._rays = rays
+        self.rays = rays
         self.min_wavelength = min_wavelength
         self.max_wavelength = max_wavelength
         self._colormap = colormap
-        self._ray_signature = set([
-            "x_start", "y_start", "z_start", "x_end", "y_end", "z_end", "wavelength"
-        ])
 
         self._mesh = None
-        self._actor = None
-
-    @property
-    def rays(self):
-        return self._rays
-
-    @rays.setter
-    def rays(self, rays):
-        if bool(rays):
-            try:
-                if self._ray_signature <= rays.keys():
-                    self._rays = rays
-                else:
-                    raise ValueError(
-                        f"RayDrawer: Rays does not have the proper"
-                        " signature."
-                    )
-                    
-            except AttributeError as e:
-                raise ValueError(
-                    f"RayDrawer: Rays doesn't have a signature."
-            ) from e
-        else:
-            self._rays = {}
 
     def draw(self):
         """Redraw the pyvista actor controlled by this class."""
-        if bool(self.rays) and tf.greater(tf.shape(self.rays['x_start'])[0], 0):
-            start_points = tf.stack(
-                [self.rays[field] for field in ("x_start", "y_start", "z_start")],
-                axis=1
-            )
-            end_points = tf.stack(
-                [self.rays[field] for field in ("x_end", "y_end", "z_end")], 
-                axis=1
-            )
-            all_points = tf.concat([start_points, end_points], 0)
-            line_count = tf.shape(self.rays["x_start"])[0]
-            cell_range = tf.range(2 * line_count)
-            cells = tf.stack([
-                2 * tf.ones((line_count,), dtype=tf.int32),
+        if self.rays is not None:
+            all_points = np.concatenate((self.rays[:, :3], self.rays[:, 3:6]), axis=0)
+
+            line_count = self.rays.shape[0]
+            cell_range = np.arange(2 * line_count)
+            cells = np.stack([
+                2 * np.ones((line_count,), dtype=np.int32),
                 cell_range[:line_count],
                 cell_range[line_count:]
-            ], axis=1)
+            ], axis=1).flatten()
 
             if self._mesh is None:
-                self._mesh = pv.PolyData()
-            self._mesh.points = all_points.numpy()
-            self._mesh.lines = cells.numpy()
-            self._mesh["wavelength"] = self.rays["wavelength"]
-            
-            self._actor = self.plot.add_mesh(
-                self._mesh,
-                cmap=self._colormap,
-                clim=(self.min_wavelength, self.max_wavelength),
-                reset_camera=False
-            )
-        else: # nothing to draw
-            if self._actor is not None:
-                self.plot.remove_actor(self._actor)
-                self._mesh = None
+                self._mesh = pv.PolyData(all_points, lines=cells)
+                self._mesh["wavelength"] = self.rays[:, 6]
+                self.plot.add_mesh(
+                    self._mesh,
+                    cmap=self._colormap,
+                    clim=(self.min_wavelength, self.max_wavelength)
+                )
+            else:
+                self._mesh.points = all_points
+                self._mesh.lines = cells
+                self._mesh["wavelength"] = self.rays[:, 6]
 
-    def delete(self):
-        self.plot.remove_actor(self._norm_actor)
-        self.plot.remove_actor(self._parameter_actor)
-        self.plot.remove_actor(self._actor)
+        else:
+            if self._mesh is not None:
+                self._mesh.points = np.zeros((0, 3))
+                self._mesh["wavelength"] = np.zeros((0,))
 
 
 class TriangleDrawer:
@@ -210,6 +171,7 @@ class TriangleDrawer:
         self.parameter_arrow_visibility = parameter_arrow_visibility
         self.parameter_arrow_length = parameter_arrow_length
         self._actor = None
+        self._mesh = None
         self._norm_actor = None
         self._parameter_actor = None
         self.color = color
@@ -218,17 +180,13 @@ class TriangleDrawer:
     def _draw_norm_arrows(self):
         self.plot.remove_actor(self._norm_actor)
         if self.norm_arrow_visibility:
-            faces = self.component.faces
-            vertices = self.component.vertices
-            first_index, pivot_index, second_index = tf.unstack(faces, axis=1)
-            pivot_points = tf.gather(vertices, pivot_index)
-            first_points = tf.gather(vertices, first_index)
-            second_points = tf.gather(vertices, second_index)
-            points = (pivot_points + first_points + second_points)/3
+
+            a, b, c = self.component.face_vertices
+            points = (a + b + c)/3
 
             self._norm_actor = self.plot.add_arrows(
                 points.numpy(),
-                self.component["norm"].numpy(),
+                self.component.norm.numpy(),
                 mag=self.norm_arrow_length,
                 color=self.color,
                 reset_camera=False
@@ -238,28 +196,50 @@ class TriangleDrawer:
         self.plot.remove_actor(self._parameter_actor)
         if self.parameter_arrow_visibility:
             if hasattr(self.component, "vectors"):
+                try:
+                    vertices = self.component.vertices.numpy()[self.component.movable_indices]
+                except AttributeError:
+                    vertices = self.component.vertices.numpy()
+
                 self._parameter_actor = self.plot.add_arrows(
-                    self.component.vertices.numpy(),
+                    vertices,
                     self.component.vectors.numpy(),
                     mag=self.parameter_arrow_length,
                     color=self.color,
                     reset_camera=False
                 )
             
+    def rebuild(self):
+        self.plot.remove_actor(self._actor)
+
+        # draw the mesh itself
+        self._mesh = self.component.as_mesh()
+        self._actor = self.plot.add_mesh(
+            self._mesh,
+            color=self.color,
+            show_edges=self.show_edges,
+            reset_camera=False
+        )
+
     def draw(self):
         self.plot.remove_actor(self._norm_actor)
         self.plot.remove_actor(self._parameter_actor)
-        self.plot.remove_actor(self._actor)
+        self._actor.SetVisibility(self.visible)
         if self.visible:
-            # draw the mesh itself
-            self._actor = self.plot.add_mesh(
-                self.component.as_mesh(),
-                color=self.color,
-                show_edges=self.show_edges,
-                reset_camera=False
-            )
+            if self._mesh is None:
+                self.rebuild()
+
+            # Set the data on the mesh
+            try:
+                self._mesh.points, self._mesh.faces = (
+                    self.component.vertices.numpy(), mt.pack_faces(self.component.faces.numpy())
+                )
+            except Exception:
+                self._mesh.points, self._mesh.faces = (
+                 np.array(self.component.vertices), mt.pack_faces(np.array(self.component.faces))
+                )
                 
-            # draw the norm arrows
+            # Draw the arrows
             self._draw_norm_arrows()
             self._draw_parameter_arrows()
 

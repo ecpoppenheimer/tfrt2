@@ -25,6 +25,7 @@ import tfrt2.src.drawing as drawing
 import tfrt2.src.settings as settings
 import tfrt2.src.component_widgets as component_widgets
 import tfrt2.src.wavelength as wavelength
+import tfrt2.src.optics as optics
 
 
 class OpticClientWindow(qtw.QWidget):
@@ -194,12 +195,11 @@ class OpticClientWindow(qtw.QWidget):
             # be changed.
             spec = importlib.util.spec_from_file_location(
                 name="system_module",
-                location=str(path / "optical_system.py")
+                location=str(path / "optical_script.py")
             )
             system_module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(system_module)
 
-            print(f"about to make a system on {path}")
             self.trace_engine.optical_system = system_module.get_system(self, path)
             self.trace_engine.validate_system()
 
@@ -249,6 +249,7 @@ class OpticClientWindow(qtw.QWidget):
                 self.trace_engine.ray_trace(self.settings.trace_depth)
             except AttributeError:
                 # can fail if no system is present
+                # print(traceback.format_exc())
                 pass
 
             self._update_rays_sig.sig.emit()
@@ -326,21 +327,21 @@ class DisplayControls(qtw.QWidget):
         if system is not None:
             if system.optical_parts:
                 for part in system.optical_parts:
-                    controller = component_widgets.TrigBoundaryDisplayController(part, self.parent_client.plot)
+                    controller = optics.TrigBoundaryDisplayController(part, self.parent_client.plot)
                     self.add_widget(qtw.QLabel(part.name))
                     self.add_widget(controller)
                     self.optical_controllers.append(controller)
 
             if system.stop_parts:
                 for part in system.stop_parts:
-                    controller = component_widgets.TrigBoundaryDisplayController(part, self.parent_client.plot)
+                    controller = optics.TrigBoundaryDisplayController(part, self.parent_client.plot)
                     self.add_widget(qtw.QLabel(part.name))
                     self.add_widget(controller)
                     self.stop_controllers.append(controller)
 
             if system.target_parts:
                 for part in system.target_parts:
-                    controller = component_widgets.TrigBoundaryDisplayController(part, self.parent_client.plot)
+                    controller = optics.TrigBoundaryDisplayController(part, self.parent_client.plot)
                     self.add_widget(qtw.QLabel(part.name))
                     self.add_widget(controller)
                     self.target_controllers.append(controller)
@@ -379,6 +380,8 @@ class ComponentControls(qtw.QWidget):
 
     def update_with_system(self, system):
         for widget in self._added_widgets:
+            if hasattr(widget, "remove_drawer"):
+                widget.remove_drawer()
             widget.deleteLater()
         self._added_widgets = []
 
@@ -415,6 +418,7 @@ class TraceControls(qtw.QWidget):
         3: "dead_rays",
         4: "stopped_rays",
         5: "all_rays",
+        6: "sources"
     }
 
     def __init__(self, parent):
@@ -479,6 +483,8 @@ class TraceControls(qtw.QWidget):
         rayset = self.rayset_enum[self.parent_client.settings.active_set]
         if rayset == "None":
             self.ray_drawer.rays = None
+        elif rayset == "sources":
+            self.ray_drawer.rays = self.parent_client.trace_engine.optical_system.get_source_rays()
         else:
             self.ray_drawer.rays = getattr(self.parent_client.trace_engine, rayset)
         self.ray_drawer.draw()
@@ -509,6 +515,8 @@ class ParameterControls(qtw.QWidget):
 
     def update_with_system(self, system):
         for widget in self._added_widgets:
+            if hasattr(widget, "remove_drawer"):
+                widget.remove_drawer()
             widget.deleteLater()
         self._added_widgets = []
 

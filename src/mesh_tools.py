@@ -1,7 +1,6 @@
 """
 Various useful mesh processing functions.
 """
-import numpy
 import numpy as np
 import tensorflow as tf
 
@@ -23,7 +22,7 @@ def unpack_faces(faces):
     return np.reshape(faces, (-1, 4))[:, 1:]
 
 
-def points_from_vertices(vertices, faces):
+def points_from_faces(vertices, faces):
     first_index, second_index, third_index = tf.unstack(faces, axis=1)
     first_points = tf.gather(vertices, first_index)
     second_points = tf.gather(vertices, second_index)
@@ -52,7 +51,7 @@ def np_projection(x, y):
     return np.clip(np_dot(x, y), -1.0, 1.0)
 
 
-def cosine_vum(origin, vertices, faces):
+def cosine_vum(origin, points, vertices, faces):
     """
     A vertex update map can help speed up training by reducing the number of vertices a face can control to prevent
     adjacent faces from fighting each other.
@@ -65,35 +64,52 @@ def cosine_vum(origin, vertices, faces):
     origin : float tensor of shape (3,)
         A single point around which to center the update map.  Often it makes sense to put this at the center of mass
         of the vertices, but different optics could benefit from different locations.
-    vertices : float tensor of shape (n, 3)
-        The vertices of the mesh to provide this VUM for.
-    faces : float tensor of shape (m, 3)
-        The faces of the mesh to provide this VUM for.
+    points : 3-tuple of float tensor of shape (n, 3)
+        The vertices of the mesh to provide this VUM for.  This is a 3-tuple of vertices that have already been
+        expanded out of the faces (i.e. all three vertices for each face)
+    vertices : float tensor of shape (m, 3)
+        The vertices of the mesh, but not expanded.
+    faces : int tensor of shape (n, 3)
+        The faces of the mesh.
 
     Returns
     -------
     A boolean tensor of shape (m, 3)
     """
     # points is a 3-tuple of individual points, which are just vertices indexed by faces.
-    points = points_from_vertices(vertices, faces)
     face_centers = (points[0] + points[1] + points[2]) / 3.0
     inner_product = tf.stack([projection(each - face_centers, face_centers - origin) for each in points], axis=1)
     # could possibly be nans, if any face is on the origin, it will fail to normalize.  In any case this is found, set
     # the element to 1 to allow it to move.
-    inner_product = tf.where(tf.math.is_nan(inner_product), 1.0, inner_product)
+    inner_product = tf.where(tf.math.is_nan(inner_product), 1.0, inner_product).numpy()
 
-    # select movable via ip threshold
-    movable = inner_product > -.05
-    # select movable via selecting two largest ips
-    #movable = tf.argsort(inner_product) != 0
-    #for i in range(len(inner_product)):
-    #    print(f"inner product: {inner_product[i]}, movable: {movable[i]}")
+    # select movable via selecting two largest ip
+    minimum = np.argmin(inner_product, axis=-1, keepdims=True)
+    movable = np.tile([[0, 1, 2]], (len(inner_product), 1))
+    movable = movable != minimum
 
-    # check that every face has at least one movable vertex.  If any do not, set them all to movable
-    movable_count = tf.reduce_sum(tf.cast(movable, tf.int32), axis=1)
-    immobile = movable_count == 0
-    immobile = tf.broadcast_to(tf.reshape(immobile, (-1, 1)), movable.shape)
-    return tf.logical_or(movable, immobile)
+    # Check that every face has two movable vertices.  By construction they should, and it any are found without
+    # then something has gone wrong.
+    movable_count = np.sum(movable, axis=-1)
+    assert np.all(movable_count == 2), "mesh_tools.cosine_vum: Got a face without two movable vertices."
+
+    # Check that every vertex has at least one movable, and if there aren't any, set it as movable to at least one face.
+    # It would be nice to set it as movable to maybe one face.  But it is super easy to just set it as movable to
+    # every face.  This should be a rare occurrence, and I don't want to spend more time developing this, so this
+    # is what I am going to do
+    vertex_move_count, bins = np.histogram(
+        np.where(movable, faces, -1).flatten(),
+        bins=np.arange(-1, len(vertices) + 1)
+    )
+    # -1 is used in the histogram as a sentinel for non-movable vertices.  Have to subtract 1 from the line below
+    # to remove this element and find the true indices of the non-movable vertices
+    immobile_vertices = np.argwhere(vertex_move_count == 0).flatten() - 1
+    not_movable = np.logical_not(movable)
+    for v in immobile_vertices:
+        highlight = np.logical_and(faces == v, not_movable)
+        movable = np.logical_or(movable, highlight)
+
+    return tf.constant(movable, dtype=tf.bool)
 
 
 def cosine_acum(origin, vertices):

@@ -55,13 +55,13 @@ class Mk5System(fancy_optics.FancySystem):
             vg.FromVectorVG((0.0, 0.0, 1.0)),
             self.client,
             path_to_self,
-            mesh=pv.Plane(i_resolution=9, j_resolution=9).triangulate(),
+            mesh=pv.Plane(direction=(0.0, 0.0, -1.0), i_resolution=5, j_resolution=5).triangulate(),
             settings=self.settings.lens,
             mat_in=1,
             mat_out=0,
-            #filter_fixed=filter_fixed,
-            #filter_drivers=filter_drivers,
-            #attach_to_driver=attach_to_driver
+            filter_fixed=filter_fixed,
+            filter_drivers=filter_drivers,
+            attach_to_driver=attach_to_driver
         )
         lens.update()
 

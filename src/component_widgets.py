@@ -9,19 +9,25 @@ import pyvista as pv
 import numpy as np
 import tensorflow as tf
 
-import tfrt2.src.drawing as drawing
-import tfrt2.src.mesh_tools as mt
+from matplotlib.backends.backend_qt5agg import (
+    FigureCanvas, NavigationToolbar2QT as NavigationToolbar
+)
+from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
 
 
 class SettingsEntryBox(qtw.QWidget):
     def __init__(
-            self, settings, key, value_type, validator=None, callback=None
+            self, settings, key, value_type, validator=None, callback=None, label=None
     ):
         super().__init__()
         layout = qtw.QHBoxLayout()
         self.setLayout(layout)
 
-        label = qtw.QLabel(str(key).replace("_", " "))
+        if label is None:
+            label = qtw.QLabel(str(key).replace("_", " "))
+        else:
+            label = qtw.QLabel(str(label))
         label.setSizePolicy(qtw.QSizePolicy.Minimum, qtw.QSizePolicy.Minimum)
         layout.addWidget(label)
 
@@ -42,6 +48,64 @@ class SettingsEntryBox(qtw.QWidget):
                     edit_box.editingFinished.connect(each)
             except TypeError:
                 edit_box.editingFinished.connect(callback)
+
+
+class SettingsRangeBox(qtw.QWidget):
+    def __init__(self, settings, label, low_key, high_key, value_type, validator=None, callback=None):
+        super().__init__()
+        layout = qtw.QHBoxLayout()
+        self.setLayout(layout)
+        self.settings = settings
+
+        label = qtw.QLabel(label)
+        label.setSizePolicy(qtw.QSizePolicy.Minimum, qtw.QSizePolicy.Minimum)
+        layout.addWidget(label)
+
+        low_entry = qtw.QLineEdit()
+        layout.addWidget(low_entry)
+        low_entry.setText(str(settings.dict[low_key]))
+        if validator:
+            low_entry.setValidator(validator)
+
+        high_entry = qtw.QLineEdit()
+        layout.addWidget(high_entry)
+        high_entry.setText(str(settings.dict[high_key]))
+        if validator:
+            high_entry.setValidator(validator)
+
+        def low_callback():
+            low_value = value_type(low_entry.text())
+            high_value = value_type(high_entry.text())
+
+            if low_value >= high_value:
+                low_entry.setStyleSheet("QLineEdit { background-color: pink}")
+            else:
+                low_entry.setStyleSheet("QLineEdit { background-color: white}")
+                settings.dict[low_key] = low_value
+                if callback is not None:
+                    try:
+                        for each in callback:
+                            each()
+                    except TypeError:
+                        callback()
+
+        def high_callback():
+            low_value = value_type(low_entry.text())
+            high_value = value_type(high_entry.text())
+
+            if high_value <= low_value:
+                high_entry.setStyleSheet("QLineEdit { background-color: pink}")
+            else:
+                high_entry.setStyleSheet("QLineEdit { background-color: white}")
+                settings.dict[high_key] = high_value
+                if callback is not None:
+                    try:
+                        for each in callback:
+                            each()
+                    except TypeError:
+                        callback()
+        low_entry.editingFinished.connect(low_callback)
+        high_entry.editingFinished.connect(high_callback)
 
 
 class SettingsFileBox(qtw.QWidget):
@@ -236,128 +300,87 @@ class SettingsCheckBox(qtw.QWidget):
                 check_box.stateChanged.connect(callback)
 
 
+class MPLWidget(qtw.QWidget):
+    """
+    A pyqt widget that displays a mpl plot, with a built in toolbar.
+
+    Parameters
+    ----------
+    alignment : 4-tuple of floats, optional
+        The area in figure coordinates where the axes will sit.  Defaults to None, in which
+        case the value used is chosen based on the value of parameter blank.  If blank is
+        True, uses the value (0.0, 0.0, 1.0, 1.0) in which case the axes cover exactly the
+        whole drawing area, which is great if you are displaying an image.  If blank is False,
+        uses (.1, .1, .898, .898) which is a good starter option for plots with displayed
+        labels, but you may want to tweak manually.  .9 has a tendency to cut off the line on
+        the left size of the plot.
+        The first two numbers anchor the lower left corner, the second two
+        are a span.  The values are all relative to the size of the canvas, so between 0 and
+        1.
+    fig_size : 2-tuple of floats, optional
+        The default size of the figure.  But since pyqt messes with widget size a lot this
+        is more of a rough starting guess than an actual set value..
+    blank : bool, optional
+        If False, the default, draws the plot as normal.
+        If True, the canvas will be a blank white square with no axes or anything, ideal
+        for drawing.
+    args and kwargs passed to qtw.QWidget constructor
+
+    Public Properties
+    -----------------
+    fig : mpl figure
+        A handle to the generated mpl figure.
+    ax : mpl axes
+        A handle to the generated axes, where you can draw/plot stuff.
+    fig_canvas : mpl backend object
+        The canvas object that plugs into pyqt.
+
+    Public Methods
+    --------------
+    draw() :
+        Draw or redraw the figure.
+    """
+
+    def __init__(
+            self,
+            name=None,
+            alignment=None,
+            fig_size=(2.5, 2.5),
+            blank=False,
+            *args,
+            **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+
+        self.fig = Figure(figsize=fig_size)
+        self.fig_canvas = FigureCanvas(self.fig)
+        if alignment is None:
+            if blank:
+                alignment = (0.0, 0.0, 1.0, 1.0)
+            else:
+                alignment = (.1, .1, .898, .898)
+        self.ax = self.fig.add_axes(alignment)
+        if blank:
+            self.ax.set_frame_on(False)
+            self.ax.axes.get_xaxis().set_visible(False)
+            self.ax.axes.get_yaxis().set_visible(False)
+            self.ax.axes.get_xaxis().set_major_locator(plt.NullLocator())
+            self.ax.axes.get_yaxis().set_major_locator(plt.NullLocator())
+
+        layout = qtw.QVBoxLayout()
+        if name:
+            label = qtw.QLabel(name)
+            label.setSizePolicy(qtw.QSizePolicy.Minimum, qtw.QSizePolicy.Fixed)
+            layout.addWidget(label)
+        layout.addWidget(self.fig_canvas)
+        layout.addWidget(NavigationToolbar(self.fig_canvas, self))
+        self.setLayout(layout)
+
+    def draw(self):
+        self.fig_canvas.draw()
+
+
 # ======================================================================================================================
-
-
-class SourceController(qtw.QWidget):
-    def __init__(self, component):
-        super().__init__()
-        self.component = component
-
-        # build the UI elements
-        main_layout = qtw.QVBoxLayout()
-        self.setLayout(main_layout)
-
-
-class TrigBoundaryDisplayController(qtw.QWidget):
-    def __init__(self, component, plot):
-        super().__init__()
-        self.component = component
-        self._permit_draws = False
-        self._params_valid = hasattr(self.component, "parameters")
-
-        # define the default display settings for this component
-        if self._params_valid:
-            drawing_settings = self.component.settings.establish_defaults(
-                visible=True,
-                norm_arrow_visibility=False,
-                norm_arrow_length=0.1,
-                parameter_arrow_visibility=False,
-                parameter_arrow_length=0.1,
-                color="cyan",
-                show_edges=False
-            )
-        else:
-            drawing_settings = self.component.settings.establish_defaults(
-                visible=True,
-                norm_arrow_visibility=False,
-                norm_arrow_length=0.1,
-                color="cyan",
-                show_edges=False
-            )
-
-        self.drawer = drawing.TriangleDrawer(plot, component, **self.component.settings.get_subset(drawing_settings))
-        self.component.drawer = self.drawer
-
-        self._valid_colors = set(pv.hexcolors.keys())
-
-        # build the UI elements
-        main_layout = qtw.QGridLayout()
-        self.setLayout(main_layout)
-
-        # visibility check box
-        self.build_check_box(main_layout, 0, "visible")
-
-        # color line edit
-        main_layout.addWidget(qtw.QLabel("color"), 1, 0)
-        color_widget = qtw.QLineEdit(self)
-        color_widget.setText(str(self.component.settings.color))
-        color_widget.editingFinished.connect(self.change_color)
-        main_layout.addWidget(color_widget, 1, 1)
-        self.color_widget = color_widget
-
-        # edges check box
-        self.build_check_box(main_layout, 2, "show_edges")
-
-        # norm arrows controls
-        self.build_check_box(main_layout, 3, "norm_arrow_visibility")
-        self.build_entry_box(main_layout, 4, "norm_arrow_length", float, qtg.QDoubleValidator(0, 1e6, 5))
-
-        if self._params_valid:
-            self.build_check_box(main_layout, 5, "parameter_arrow_visibility")
-            self.build_entry_box(main_layout, 6, "parameter_arrow_length", float, qtg.QDoubleValidator(0, 1e6, 5))
-
-        self._permit_draws = True
-
-    def redraw(self):
-        if self._permit_draws:
-            self.drawer.draw()
-
-    def change_color(self):
-        color = self.color_widget.text()
-        if color in self._valid_colors:
-            self.component.settings.color = color
-            self.drawer.color = color
-            self.redraw()
-            self.color_widget.setStyleSheet("QLineEdit { background-color: white}")
-        else:
-            self.color_widget.setStyleSheet("QLineEdit { background-color: pink}")
-
-    def remove_drawer(self):
-        self.drawer.delete()
-
-    def build_check_box(self, main_layout, layout_index, name):
-        main_layout.addWidget(qtw.QLabel(str(name).replace("_", " ")), layout_index, 0)
-        widget = qtw.QCheckBox("")
-
-        def callback(state):
-            state = bool(state)
-            self.component.settings.dict[name] = state
-            setattr(self.drawer, name, state)
-            self.redraw()
-
-        widget.setCheckState(self.component.settings.dict[name])
-        callback(self.component.settings.dict[name])
-        widget.setTristate(False)
-        widget.stateChanged.connect(callback)
-        main_layout.addWidget(widget, layout_index, 1)
-
-    def build_entry_box(self, main_layout, layout_index, name, value_type, validator=None):
-        main_layout.addWidget(qtw.QLabel(name), layout_index, 0)
-        widget = qtw.QLineEdit(self)
-        if validator:
-            widget.setValidator(validator)
-
-        def callback():
-            value = value_type(widget.text())
-            self.component.settings.dict[name] = value
-            setattr(self.drawer, name, value)
-            self.redraw()
-
-        widget.setText(str(self.component.settings.dict[name]))
-        callback()
-        widget.editingFinished.connect(callback)
-        main_layout.addWidget(widget, layout_index, 1)
 
 
 class ParameterController(qtw.QWidget):
@@ -365,6 +388,7 @@ class ParameterController(qtw.QWidget):
         super().__init__()
         self.component = component
         self._suppress_updates = False
+        self.smoother = None
 
         # Build the UI elements
         main_layout = qtw.QGridLayout()
@@ -390,7 +414,7 @@ class ParameterController(qtw.QWidget):
         self.parameter_list.horizontalHeader().setSectionResizeMode(0, qtw.QHeaderView.Stretch)
         self.parameter_list.hide()
         self.parameter_list.itemChanged.connect(self.edit_parameter)
-        main_layout.addWidget(self.parameter_list, 1, 0, 2, 2)
+        main_layout.addWidget(self.parameter_list, 1, 0, 1, 2)
 
         def toggle_list():
             state = not self.parameter_list.isHidden()
@@ -440,7 +464,7 @@ class ParameterController(qtw.QWidget):
         reset_layout.addWidget(noise_button)
         reset_layout.addWidget(noise_scale)
 
-        main_layout.addWidget(reset_widget, 3, 0, 4, 2)
+        main_layout.addWidget(reset_widget, 3, 0, 1, 2)
 
         # Button to test the accumulator on a parameter.
         try:
@@ -464,7 +488,7 @@ class ParameterController(qtw.QWidget):
                 self.acumulator_scale_edit.setValidator(qtg.QDoubleValidator(1e-9, 1e-9, 10))
                 acumulator_layout.addWidget(self.acumulator_scale_edit, 1, 2)
 
-                main_layout.addWidget(acumulator_widget, 5, 0, 6, 2)
+                main_layout.addWidget(acumulator_widget, 5, 0, 1, 2)
         except Exception:
             pass
 
@@ -472,11 +496,11 @@ class ParameterController(qtw.QWidget):
         self.component.settings.establish_defaults(smooth_stddev=.05)
         main_layout.addWidget(SettingsEntryBox(
             self.component.settings, "smooth_stddev", float, qtg.QDoubleValidator(1e-6, 1e6, 8), self.make_smoother
-        ), 7, 0, 8, 2)
+        ), 6, 0, 1, 2)
         self.make_smoother()
         smooth_button = qtw.QPushButton("Test Smoother")
         smooth_button.clicked.connect(self.test_smoother)
-        main_layout.addWidget(smooth_button, 8, 0, 9, 1)
+        main_layout.addWidget(smooth_button, 7, 0, 1, 1)
 
         # optionally register a callback to update the parameters from the boundary.  This only works if the boundary
         # explicitly calls the signal
@@ -544,10 +568,13 @@ class ParameterController(qtw.QWidget):
             pass
 
     def make_smoother(self):
-        print("make smoother")
+        self.smoother = self.component.get_smoother(self.component.settings.smooth_stddev)
 
     def test_smoother(self):
-        print("test smoother")
+        if self.smoother is None:
+            self.make_smoother()
+        self.component.smooth(self.smoother)
+        self.update_everything()
 
 
 class OpticController(qtw.QWidget):
@@ -570,7 +597,7 @@ class OpticController(qtw.QWidget):
         """
         super().__init__()
         self.component = component
-        self.client = None
+        self.client = client
         self._params_valid = hasattr(self.component, "parameters")
         settings_keys = set(self.component.settings.dict.keys())
         self._input_valid = "mesh_input_path" in settings_keys
@@ -710,7 +737,7 @@ class MeshTricksController(qtw.QWidget):
             main_layout.addWidget(
                 SettingsCheckBox(
                     self.component, "Show vum origin", "vum_origin_visible", self.toggle_vum_origin_display
-                ), 2, 1, 3, 2
+                ), 2, 1, 1, 1
             )
             self.toggle_vum_origin_display(self.component.settings.vum_origin_visible)
 
@@ -728,13 +755,13 @@ class MeshTricksController(qtw.QWidget):
                     "Acum Origin",
                     "accumulator_origin",
                     [self.update_acum_origin_display, self.component.try_mesh_tools]
-                ), 1, 0, 2, 2
+                ), 1, 0, 1, 2
             )
             self.component.settings.establish_defaults(acum_origin_visible=False)
             main_layout.addWidget(
                 SettingsCheckBox(
                     self.component, "Show accumulator origin", "acum_origin_visible", self.toggle_acum_origin_display
-                ), 2, 0, 3, 1
+                ), 2, 0, 1, 1
             )
             self.toggle_acum_origin_display(self.component.settings.acum_origin_visible)
 
@@ -744,11 +771,11 @@ class MeshTricksController(qtw.QWidget):
             self.component.settings.establish_defaults(vum_visible=False)
             main_layout.addWidget(
                 SettingsCheckBox(self.component, "VUM Active", "vum_active"),
-                3, 1, 4, 2
+                3, 1, 1, 1
             )
             main_layout.addWidget(
                 SettingsCheckBox(self.component, "VUM Visible", "vum_visible", self.update_vum_display),
-                5, 1, 6, 2
+                4, 1, 1, 1
             )
         else:
             self.component.settings.establish_defaults(vum_active=False)
@@ -760,7 +787,7 @@ class MeshTricksController(qtw.QWidget):
             self.component.settings.establish_defaults(accumulator_active=True)
             main_layout.addWidget(
                 SettingsCheckBox(self.component, "Accumulator Active", "accumulator_active"),
-                3, 0, 4, 1
+                3, 0, 1, 1
             )
         else:
             self.component.settings.establish_defaults(accumulator_active=False)
@@ -807,3 +834,9 @@ class MeshTricksController(qtw.QWidget):
 
     def update_displays(self):
         self.update_vum_display(self.component.settings.vum_visible)
+
+    def remove_drawer(self):
+        self.client.plot.remove_actor(self.vum_actor)
+        self.client.plot.remove_actor(self.vum_origin_actor)
+        self.client.plot.remove_actor(self.acum_origin_actor)
+
