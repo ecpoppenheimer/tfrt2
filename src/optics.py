@@ -18,7 +18,7 @@ class TriangleOptic:
     """
     dimension = 3
 
-    def __init__(self, name, client, system_path, settings, mesh=None, mat_in=None, mat_out=None, hold_load=False):
+    def __init__(self, client, system_path, settings, mesh=None, mat_in=None, mat_out=None, hold_load=False):
         """
         Basic 3D Triangulated optical surface.
 
@@ -79,7 +79,7 @@ class TriangleOptic:
         """
         self.settings = settings or settings.Settings()
         self.frozen = False
-        self.name = str(name)
+        self.name = None
         self.mat_in = mat_in
         self.mat_out = mat_out
         self.controller_widgets = []
@@ -149,7 +149,6 @@ class ParametricTriangleOptic(TriangleOptic):
     """
     def __init__(
         self,
-        name,
         vector_generator,
         client,
         system_path,
@@ -192,9 +191,6 @@ class ParametricTriangleOptic(TriangleOptic):
 
         Parameters
         ----------
-        name : str
-            A unique name used to identify this component.  Uniqueness will be enforced when this component is
-            added to a system.
         vector_generator : callable
             A function that will generate a set of n vectors when given a set of n 3D points.  Used to attach
             vectors to each vertex so they can be moved by the parameters.
@@ -298,7 +294,7 @@ class ParametricTriangleOptic(TriangleOptic):
         else:
             self.parameters_updated = None
 
-        super().__init__(name, client, system_path, settings, None, mat_in=mat_in, mat_out=mat_out, hold_load=True)
+        super().__init__(client, system_path, settings, None, mat_in=mat_in, mat_out=mat_out, hold_load=True)
 
         if self.enable_vum or self.enable_accumulator:
             self.mt_controller = cw.MeshTricksController(self, client)

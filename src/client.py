@@ -200,11 +200,10 @@ class OpticClientWindow(qtw.QWidget):
             system_module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(system_module)
 
-            self.trace_engine.optical_system = system_module.get_system(self, path)
-            self.trace_engine.validate_system()
+            self.settings.system_path = path
+            self.trace_engine.optical_system = system_module.get_system(self)
 
             # If we reach here than we have achieved success!
-            self.settings.system_path = path
             self.ui.loaded_label.setText(f"Current System: {str(path)}")
             self.ui.reload_button.setEnabled(True)
             self.retrace_button.setEnabled(True)
@@ -325,26 +324,23 @@ class DisplayControls(qtw.QWidget):
         self.stop_controllers = []
 
         if system is not None:
-            if system.optical_parts:
-                for part in system.optical_parts:
-                    controller = optics.TrigBoundaryDisplayController(part, self.parent_client.plot)
-                    self.add_widget(qtw.QLabel(part.name))
-                    self.add_widget(controller)
-                    self.optical_controllers.append(controller)
+            for part in system.opticals:
+                controller = optics.TrigBoundaryDisplayController(part, self.parent_client.plot)
+                self.add_widget(qtw.QLabel(part.name))
+                self.add_widget(controller)
+                self.optical_controllers.append(controller)
 
-            if system.stop_parts:
-                for part in system.stop_parts:
-                    controller = optics.TrigBoundaryDisplayController(part, self.parent_client.plot)
-                    self.add_widget(qtw.QLabel(part.name))
-                    self.add_widget(controller)
-                    self.stop_controllers.append(controller)
+            for part in system.stops:
+                controller = optics.TrigBoundaryDisplayController(part, self.parent_client.plot)
+                self.add_widget(qtw.QLabel(part.name))
+                self.add_widget(controller)
+                self.stop_controllers.append(controller)
 
-            if system.target_parts:
-                for part in system.target_parts:
-                    controller = optics.TrigBoundaryDisplayController(part, self.parent_client.plot)
-                    self.add_widget(qtw.QLabel(part.name))
-                    self.add_widget(controller)
-                    self.target_controllers.append(controller)
+            for part in system.targets:
+                controller = optics.TrigBoundaryDisplayController(part, self.parent_client.plot)
+                self.add_widget(qtw.QLabel(part.name))
+                self.add_widget(controller)
+                self.target_controllers.append(controller)
 
         self.updateGeometry()
         if self.parent_scroll_area:
@@ -521,9 +517,8 @@ class ParameterControls(qtw.QWidget):
         self._added_widgets = []
 
         if system is not None:
-            if system.optical_parts:
-                for part in system.optical_parts:
-                    if hasattr(part, "parameters"):
+            for part in system.opticals:
+                if hasattr(part, "parameters"):
                         controller = component_widgets.ParameterController(part)
                         self.add_widget(qtw.QLabel(part.name))
                         self.add_widget(controller)

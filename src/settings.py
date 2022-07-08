@@ -49,3 +49,8 @@ class Settings:
         for key in self.keys():
             if type(self.dict[key]) is dict:
                 self.dict[key] = Settings(**self.dict[key])
+
+
+def save(d, filename):
+    with open(filename, "wb") as outFile:
+        pickle.dump(d, outFile, pickle.HIGHEST_PROTOCOL)

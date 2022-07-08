@@ -101,6 +101,7 @@ class Source3D:
             is specified.
         """
         self.settings = settings
+        self.name = None
         self.settings.establish_defaults(
             ray_count=100,
             center=[0.0, 0.0, 0.0],
