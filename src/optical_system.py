@@ -3,9 +3,10 @@ from pathlib import Path
 import tensorflow as tf
 
 import tfrt2.src.settings as settings
+from tfrt2.src.trace_engine import TraceEngine3D
 
 
-class OpticalSystem:
+class OpticalSystem(TraceEngine3D):
     """
     A container that manages a collection of optical components.  This is the core of an optical script.
 
@@ -22,30 +23,51 @@ class OpticalSystem:
     is that it allows you to avoid having to deal with settings initialization.  Settings are initialized in the
     super constructor, so that self.settings.name is a valid identifier to feed to the component initializer.  feed
     will automatically sort each component it is fed into the right location.
-
     sorted components are available from the lists opticals, stops, targets, and sources.  All components are available
     in parts, which is a dictionary of name: part pairs.
 
     """
     dimension = 3
 
-    def __init__(self, client, component_declaration, settings_file_name="settings.data", materials=None):
-        self.client = client
-        self.materials = materials
+    def __init__(self, driver, component_declaration, materials, settings_file_name="settings.data"):
+        """
+
+        Parameters
+        ----------
+        driver : OpticClientWindow
+            The driver program that will control this optical system.
+        component_declaration : dict
+            Name, type pairs where name is a unique string idendifying the component and type is in {optical, stop,
+            target, source}.
+        materials : list
+            A list of callables, which will most commonly come from materials.  These are functions that accept a
+            1D tensor of wavelengths in nanometers and return the refractive index of a material at that wavelength.
+            A refractive index of zero is valid, in which case the surface will be a perfectly reflective surface.
+        settings_file_name : str
+            Path to the settings file to synchronize with this system.  Local to the driver's path
+        """
+        super().__init__(tuple(materials))
+        self.driver = driver
         self.settings = settings.Settings()
-        self.self_path = self.client.settings.system_path
-        self.settings_path = Path(self.client.settings.system_path) / Path(settings_file_name)
+        self.self_path = self.driver.settings.system_path
+        self.settings_path = Path(self.driver.settings.system_path) / Path(settings_file_name)
         try:
             self.settings.load(self.settings_path)
         except Exception:
             pass
 
+        # boxes of parts, sorted by type
         self.opticals = []
         self.stops = []
         self.targets = []
         self.sources = []
+        self.parametric_optics = []
 
+        # parts, index-able by name
         self.parts = {}
+
+        # The ray sets
+        self.source_rays = tf.zeros((0, 7), dtype=tf.float64)
 
         # Check the component declaration, and initialize settings for each component
         self._part_boxes = {}
@@ -62,7 +84,7 @@ class OpticalSystem:
             self._part_boxes[name] = getattr(self, tp + "s")
         self.settings.establish_defaults(**{name: settings.Settings() for name in component_declaration.keys()})
 
-    def feed_parts(self, d):
+    def feed_parts(self, **d):
         for name, part in d.items():
             try:
                 self._part_boxes[name].append(part)
@@ -70,6 +92,8 @@ class OpticalSystem:
                 raise KeyError(f"OpticalSystem: Tried to feed a part {name} that was not declared.") from e
             self.parts[name] = part
             part.name = name
+            if hasattr(part, "parameters"):
+                self.parametric_optics.append(part)
 
     def feed_part(self, name, part):
         try:
@@ -78,9 +102,16 @@ class OpticalSystem:
             raise KeyError(f"OpticalSystem: Tried to feed a part {name} that was not declared.") from e
         self.parts[name] = part
         part.name = name
+        if hasattr(part, "parameters"):
+            self.parametric_optics.append(part)
 
     def update(self):
         for part in self.parts.values():
+            part.update()
+        self.refresh_source_rays()
+
+    def update_optics(self):
+        for part in self.opticals:
             part.update()
 
     def save(self):
@@ -92,5 +123,9 @@ class OpticalSystem:
             }
             settings.save(output_dict, self.settings_path)
 
-    def get_source_rays(self):
-        return tf.concat([source.rays for source in self.sources], axis=0)
+    def refresh_source_rays(self):
+        if self.sources:
+            self.source_rays = tf.concat([s.rays for s in self.sources], axis=0)
+        else:
+            self.source_rays = tf.zeros((0, 7), dtype=tf.float64)
+

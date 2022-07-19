@@ -91,44 +91,42 @@ class RayDrawer3D:
         colormap=mpl.colors.ListedColormap(wavelength.rgb()),
     ):
 
-        self.plot = plot
         self.rays = rays
-        self.min_wavelength = min_wavelength
-        self.max_wavelength = max_wavelength
-        self._colormap = colormap
-
-        self._mesh = None
+        self._mesh = pv.PolyData(
+            np.array(((0, 0, 0), (1, 1, 1)), dtype=np.float32),
+            lines=np.array((2, 0, 1), dtype=np.int32)
+        )
+        self._mesh["wavelength"] = np.array((580,), dtype=np.float32)
+        self._actor = plot.add_mesh(
+            self._mesh,
+            cmap=colormap,
+            clim=(min_wavelength, max_wavelength)
+        )
+        self._actor.SetVisibility(False)
 
     def draw(self):
         """Redraw the pyvista actor controlled by this class."""
         if self.rays is not None:
             all_points = np.concatenate((self.rays[:, :3], self.rays[:, 3:6]), axis=0)
 
-            line_count = self.rays.shape[0]
-            cell_range = np.arange(2 * line_count)
-            cells = np.stack([
-                2 * np.ones((line_count,), dtype=np.int32),
-                cell_range[:line_count],
-                cell_range[line_count:]
-            ], axis=1).flatten()
-
-            if self._mesh is None:
-                self._mesh = pv.PolyData(all_points, lines=cells)
-                self._mesh["wavelength"] = self.rays[:, 6]
-                self.plot.add_mesh(
-                    self._mesh,
-                    cmap=self._colormap,
-                    clim=(self.min_wavelength, self.max_wavelength)
-                )
+            if all_points.shape[0] == 0:
+                self._actor.SetVisibility(False)
             else:
+                line_count = self.rays.shape[0]
+                cell_range = np.arange(2 * line_count)
+                cells = np.stack([
+                    2 * np.ones((line_count,), dtype=np.int32),
+                    cell_range[:line_count],
+                    cell_range[line_count:]
+                ], axis=1).flatten()
+
                 self._mesh.points = all_points
                 self._mesh.lines = cells
                 self._mesh["wavelength"] = self.rays[:, 6]
-
+                self._actor.SetVisibility(True)
         else:
-            if self._mesh is not None:
-                self._mesh.points = np.zeros((0, 3))
-                self._mesh["wavelength"] = np.zeros((0,))
+            # draw an empty ray set
+            self._actor.SetVisibility(False)
 
 
 class TriangleDrawer:
@@ -161,25 +159,25 @@ class TriangleDrawer:
         parameter_arrow_length=0.1,
         visible=True,
         color="gray",
+        opacity=1.0,
         show_edges=False
     ):
         self.plot = plot
         self.component = component
         self.visible = visible
-        self.norm_arrow_visibility = norm_arrow_visibility
-        self.norm_arrow_length = norm_arrow_length
-        self.parameter_arrow_visibility = parameter_arrow_visibility
-        self.parameter_arrow_length = parameter_arrow_length
         self._actor = None
         self._mesh = None
         self._norm_actor = None
         self._parameter_actor = None
-        self.color = color
-        self.show_edges = show_edges
+        self.component.settings.establish_defaults(
+            color=color, opacity=opacity, show_edges=show_edges, norm_arrow_visibility=norm_arrow_visibility,
+            norm_arrow_length=norm_arrow_length, parameter_arrow_visibility=parameter_arrow_visibility,
+            parameter_arrow_length=parameter_arrow_length
+        )
                 
     def _draw_norm_arrows(self):
         self.plot.remove_actor(self._norm_actor)
-        if self.norm_arrow_visibility:
+        if self.component.settings.norm_arrow_visibility:
 
             a, b, c = self.component.face_vertices
             points = (a + b + c)/3
@@ -187,14 +185,14 @@ class TriangleDrawer:
             self._norm_actor = self.plot.add_arrows(
                 points.numpy(),
                 self.component.norm.numpy(),
-                mag=self.norm_arrow_length,
-                color=self.color,
+                mag=self.component.settings.norm_arrow_length,
+                color=self.component.settings.color,
                 reset_camera=False
             )
                 
     def _draw_parameter_arrows(self):
         self.plot.remove_actor(self._parameter_actor)
-        if self.parameter_arrow_visibility:
+        if self.component.settings.parameter_arrow_visibility:
             if hasattr(self.component, "vectors"):
                 try:
                     vertices = self.component.vertices.numpy()[self.component.movable_indices]
@@ -204,8 +202,8 @@ class TriangleDrawer:
                 self._parameter_actor = self.plot.add_arrows(
                     vertices,
                     self.component.vectors.numpy(),
-                    mag=self.parameter_arrow_length,
-                    color=self.color,
+                    mag=self.component.settings.parameter_arrow_length,
+                    color=self.component.settings.color,
                     reset_camera=False
                 )
             
@@ -216,8 +214,9 @@ class TriangleDrawer:
         self._mesh = self.component.as_mesh()
         self._actor = self.plot.add_mesh(
             self._mesh,
-            color=self.color,
-            show_edges=self.show_edges,
+            color=self.component.settings.color,
+            opacity=self.component.settings.opacity,
+            show_edges=self.component.settings.show_edges,
             reset_camera=False
         )
 

@@ -14,12 +14,13 @@ def get_system(client):
 
 
 class LocalSystem(OpticalSystem):
-    def __init__(self, client):
+    def __init__(self, driver):
         super().__init__(
-            client,
+            driver,
             {
                 "lens": "optical",
-            }
+            },
+            []
         )
 
         self.settings.lens.establish_defaults(

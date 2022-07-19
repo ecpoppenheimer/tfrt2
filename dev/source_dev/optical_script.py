@@ -9,13 +9,14 @@ def get_system(client):
 
 
 class LocalSystem(optical_system.OpticalSystem):
-    def __init__(self, client):
+    def __init__(self, driver):
         super().__init__(
-            client,
+            driver,
             {
                 "source1": "source",
                 "source2": "source"
-            }
+            },
+            []
         )
 
         self.feed_parts({
@@ -24,9 +25,9 @@ class LocalSystem(optical_system.OpticalSystem):
                 "",
                 self.self_path,
                 #base_points=distributions.PixelatedCircle(self.settings.source1, resolution=51),
-                base_points=distributions.PerfectCircle(self.settings.source1, resolution=51, mode="base_points"),
+                base_points=distributions.PerfectCircle(self.settings.source1, driver, resolution=51, mode="base_points"),
                 #base_points=distributions.Square(self.settings.source1),
-                aperture=distributions.Square(self.settings.source1, mode="aperture"),
+                aperture=distributions.Square(self.settings.source1, driver, mode="aperture"),
                 #angles=distributions.PerfectUniformSphere(self.settings.source1)
                 #angles=distributions.PerfectLambertianSphere(self.settings.source1)
             ),
@@ -40,6 +41,6 @@ class LocalSystem(optical_system.OpticalSystem):
                 # aperture=distributions.Square(self.settings.source2, mode="aperture"),
                 # angles=distributions.PerfectUniformSphere(self.settings.source2)
                 # angles=distributions.PixelatedLambertianSphere(self.settings.source2, resolution=51)
-                angles=distributions.PerfectLambertianSphere(self.settings.source2)
+                angles=distributions.PerfectLambertianSphere(self.settings.source2, driver)
             )
         })

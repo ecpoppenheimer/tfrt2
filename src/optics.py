@@ -18,7 +18,9 @@ class TriangleOptic:
     """
     dimension = 3
 
-    def __init__(self, client, system_path, settings, mesh=None, mat_in=None, mat_out=None, hold_load=False):
+    def __init__(
+        self, driver, system_path, settings, mesh=None, mat_in=None, mat_out=None, hold_load=False, flip_norm=False
+    ):
         """
         Basic 3D Triangulated optical surface.
 
@@ -43,7 +45,7 @@ class TriangleOptic:
         name : str
             A unique name used to identify this component.  Uniqueness will be enforced when this component is
             added to a system.
-        client : client.OpticClientWindow
+        driver : client.OpticClientWindow
             The top level client window.
         settings : dict or settings.Settings
             The settings for this optical element.
@@ -80,14 +82,15 @@ class TriangleOptic:
         self.settings = settings or settings.Settings()
         self.frozen = False
         self.name = None
-        self.mat_in = mat_in
-        self.mat_out = mat_out
+        self.mat_in = mat_in or 0
+        self.mat_out = mat_out or 0
         self.controller_widgets = []
         self.vertices = None
         self.faces = None
-        self.client = client
+        self.driver = driver
         self.face_vertices = None
         self.norm = None
+        self.flip_norm = flip_norm
 
         if not hold_load:
             if mesh is None:
@@ -95,7 +98,7 @@ class TriangleOptic:
             else:
                 self.from_mesh(mesh)
 
-        self.controller_widgets.append(cw.OpticController(self, client, system_path))
+        self.controller_widgets.append(cw.OpticController(self, driver, system_path))
 
     def load(self, in_path):
         self.from_mesh(pv.read(in_path))
@@ -111,23 +114,27 @@ class TriangleOptic:
 
     def from_mesh(self, mesh):
         self.vertices = tf.constant(mesh.points, dtype=tf.float64)
-        self.faces = tf.constant(mt.unpack_faces(mesh.faces), dtype=tf.int32)
+        self.faces = tf.constant(self.try_flip_norm(mt.unpack_faces(mesh.faces)), dtype=tf.int32)
         # Separate the vertices out by face
         self.gather_faces()
         # Compute the norm
         self.compute_norm()
+
+    def try_flip_norm(self, faces):
+        if self.flip_norm:
+            return np.take(faces, [2, 1, 0], axis=1)
+        else:
+            return faces
 
     def gather_faces(self):
         self.face_vertices = mt.points_from_faces(self.vertices, self.faces)
 
     def compute_norm(self):
         first_points, second_points, third_points = self.face_vertices
-        # This order follows the tfrt1 convention, but I am a little concerned that this is backwards - that it
-        # should be first-second instead.  I need to come back to this later once I start working on the tracer.  TODO
         self.norm = tf.linalg.normalize(
             tf.linalg.cross(
                 second_points - first_points,
-                third_points - second_points
+                third_points - first_points
             ),
             axis=1)[0]
 
@@ -149,10 +156,10 @@ class ParametricTriangleOptic(TriangleOptic):
     """
     def __init__(
         self,
-        vector_generator,
-        client,
+        driver,
         system_path,
         settings,
+        vector_generator,
         mesh=None,
         mat_in=None,
         mat_out=None,
@@ -161,7 +168,9 @@ class ParametricTriangleOptic(TriangleOptic):
         filter_fixed=None,
         filter_drivers=None,
         attach_to_driver=None,
-        qt_compat=False
+        qt_compat=False,
+        flip_norm=False,
+        constraints=None
     ):
         """
         Optic whose vertices are parameter-driven.
@@ -194,7 +203,7 @@ class ParametricTriangleOptic(TriangleOptic):
         vector_generator : callable
             A function that will generate a set of n vectors when given a set of n 3D points.  Used to attach
             vectors to each vertex so they can be moved by the parameters.
-        client : client.OpticClientWindow
+        driver : client.OpticClientWindow
             The top level client window.
         settings : dict or settings.Settings
             The settings for this optical element.
@@ -277,7 +286,6 @@ class ParametricTriangleOptic(TriangleOptic):
         self.parameters = None
         self.zero_points = None
         self.vectors = None
-        self.constraints = []
         self.fixed_points = None
         self.gather_vertices = None
         self.gather_params = None
@@ -294,13 +302,17 @@ class ParametricTriangleOptic(TriangleOptic):
         else:
             self.parameters_updated = None
 
-        super().__init__(client, system_path, settings, None, mat_in=mat_in, mat_out=mat_out, hold_load=True)
+        super().__init__(
+            driver, system_path, settings, None, mat_in=mat_in, mat_out=mat_out, hold_load=True, flip_norm=flip_norm
+        )
 
         if self.enable_vum or self.enable_accumulator:
-            self.mt_controller = cw.MeshTricksController(self, client)
+            self.mt_controller = cw.MeshTricksController(self, driver)
             self.controller_widgets.append(self.mt_controller)
         else:
             self.mt_controller = None
+
+        self.constraints = self._process_constraints(constraints)
 
         # Having some difficulty with initialization order, so need to hold off on loading until now
         if mesh is None:
@@ -410,7 +422,7 @@ class ParametricTriangleOptic(TriangleOptic):
         else:
             self.initials = initials
         self.parameters = tf.Variable(self.initials)
-        self.faces = tf.constant(mt.unpack_faces(mesh.faces), dtype=tf.int32)
+        self.faces = tf.constant(self.try_flip_norm(mt.unpack_faces(mesh.faces)), dtype=tf.int32)
         self.vectors = tf.constant(self.vector_generator(self.zero_points), dtype=tf.float64)
 
         # Need to temporarily disable the vum so we can update so we can get the parts we need to make the new VUM.
@@ -553,11 +565,21 @@ class ParametricTriangleOptic(TriangleOptic):
         smoother = tf.exp(-.5 * (self._d_mat / stddev) ** 2)
         # Normalize, so that the average position of the surface is conserved.  I... am really unsure which axis
         # we need to normalize over.
-        smoother /= tf.reduce_sum(smoother, axis=1)
+        smoother /= tf.reduce_sum(smoother, axis=0)
         return smoother
 
     def smooth(self, smoother):
         self.param_assign(tf.matmul(smoother, self.parameters))
+
+    def _process_constraints(self, constraints):
+        if constraints is None:
+            constraints = []
+        else:
+            constraints = constraints
+        for c in constraints:
+            if isinstance(c, qtw.QWidget):
+                self.controller_widgets.append(c)
+        return constraints
 
 
 class ParamsUpdatedSignal(qtc.QObject):
@@ -611,12 +633,18 @@ class TrigBoundaryDisplayController(qtw.QWidget):
         main_layout.addWidget(color_widget, 1, 1)
         self.color_widget = color_widget
 
+        # opacity entry box
+        self.opacity_widget = cw.SettingsEntryBox(
+            self.component.settings, "opacity", float, qtg.QDoubleValidator(0, 1, 3), self.change_opacity
+        )
+        main_layout.addWidget(self.opacity_widget, 2, 0)
+
         # edges check box
-        self.build_check_box(main_layout, 2, "show_edges", self.drawer.rebuild)
+        self.build_check_box(main_layout, 3, "show_edges", self.drawer.rebuild)
 
         # norm arrows controls
-        self.build_check_box(main_layout, 3, "norm_arrow_visibility")
-        self.build_entry_box(main_layout, 4, "norm_arrow_length", float, qtg.QDoubleValidator(0, 1e6, 5))
+        self.build_check_box(main_layout, 4, "norm_arrow_visibility")
+        self.build_entry_box(main_layout, 5, "norm_arrow_length", float, qtg.QDoubleValidator(0, 1e6, 5))
 
         if self._params_valid:
             self.build_check_box(main_layout, 5, "parameter_arrow_visibility")
@@ -634,10 +662,13 @@ class TrigBoundaryDisplayController(qtw.QWidget):
             self.component.settings.color = color
             self.drawer.color = color
             self.drawer.rebuild()
-            self.redraw()
             self.color_widget.setStyleSheet("QLineEdit { background-color: white}")
         else:
             self.color_widget.setStyleSheet("QLineEdit { background-color: pink}")
+
+    def change_opacity(self):
+        self.drawer.opacity = self.component.settings.opacity
+        self.drawer.rebuild()
 
     def remove_drawer(self):
         self.drawer.delete()
@@ -676,3 +707,51 @@ class TrigBoundaryDisplayController(qtw.QWidget):
         callback()
         widget.editingFinished.connect(callback)
         main_layout.addWidget(widget, layout_index, 1)
+
+
+class ClipConstraint(qtw.QWidget):
+    def __init__(self, settings, min, max):
+        super().__init__()
+        self.settings = settings
+        self.settings.establish_defaults(clip_constraint_min=min, clip_constraint_max=max)
+        layout = qtw.QHBoxLayout()
+        layout.addWidget(cw.SettingsRangeBox(
+            self.settings, "Clip Constraint Range", "clip_constraint_min", "clip_constraint_max", float,
+            validator=qtg.QDoubleValidator(-1e6, 1e6, 9)
+        ))
+        self.setLayout(layout)
+
+    def __call__(self, component):
+        component.param_assign(tf.clip_by_value(
+            component.parameters,
+            self.settings.clip_constraint_min,
+            self.settings.clip_constraint_max
+        ))
+
+
+class SpacingConstraint(qtw.QWidget):
+    def __init__(self, settings, min, target=None, mode="min"):
+        super().__init__()
+        self.settings = settings
+        self.target=target
+        if mode == "min":
+            self._reduce = tf.reduce_min
+        elif mode == "max":
+            self._reduce = tf.reduce_max
+        else:
+            raise ValueError(f"FixedMinDistanceConstraint: mode must be 'min' or 'max'.")
+        self.settings.establish_defaults(distance_constraint=min)
+        layout = qtw.QHBoxLayout()
+        layout.addWidget(cw.SettingsEntryBox(
+            self.settings, "distance_constraint", float, validator=qtg.QDoubleValidator(-1e6, 1e6, 9)
+        ))
+        self.setLayout(layout)
+
+    def __call__(self, component):
+        if self.target is None:
+            target = tf.zeros_like(component.parameters)
+        else:
+            target = self.target.parameters
+        diff = self._reduce(component.parameters - target - self.settings.distance_constraint)
+        diff = tf.broadcast_to(diff, component.parameters.shape)
+        component.param_assign_sub(diff)

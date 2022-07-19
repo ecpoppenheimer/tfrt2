@@ -13,7 +13,7 @@ class Square(qtw.QWidget):
     Generate 2D points uniformly distributed in a square (actually a rectangle), given a 2D uniform seed.
     """
     def __init__(
-            self, settings, x_width=1.0, y_width=1.0, mode="base_points"
+            self, settings, driver, x_width=1.0, y_width=1.0, mode="base_points"
     ):
         if mode == "base_points":
             x_key, y_key = "bp_x_radius", "bp_y_radius"
@@ -33,10 +33,12 @@ class Square(qtw.QWidget):
 
         layout.addWidget(qtw.QLabel(label), 0, 0, 1, 2)
         layout.addWidget(cw.SettingsEntryBox(
-            self.settings, x_key, float, validator=qtg.QDoubleValidator(0.0, 100000, 6), label="x"
+            self.settings, x_key, float, validator=qtg.QDoubleValidator(0.0, 100000, 6), label="x",
+            callback=driver.try_auto_retrace
         ), 1, 0, 1, 1)
         layout.addWidget(cw.SettingsEntryBox(
-            self.settings, y_key, float, validator=qtg.QDoubleValidator(0.0, 100000, 6), label="y"
+            self.settings, y_key, float, validator=qtg.QDoubleValidator(0.0, 100000, 6), label="y",
+            callback=driver.try_auto_retrace
         ), 1, 1, 1, 1)
 
     def __call__(self, seed):
@@ -51,7 +53,7 @@ class PixelatedCircle(qtw.QWidget):
     implementation is less efficient than PerfectCircle, but generates a direct mapping from the square seed to
     the circular output, meaning the seed could be used for goal definition with a square goal.
     """
-    def __init__(self, settings, radius=1.0, resolution=50, mode="base_points"):
+    def __init__(self, settings, driver, radius=1.0, resolution=50, mode="base_points"):
         if mode == "base_points":
             r_key = "bp_radius"
             label = "Radius of the base points"
@@ -71,7 +73,7 @@ class PixelatedCircle(qtw.QWidget):
 
         layout.addWidget(cw.SettingsEntryBox(
             self.settings, r_key, float, validator=qtg.QDoubleValidator(0.0, 100000, 6),
-            label=label
+            label=label, callback=driver.try_auto_retrace
         ))
 
         x = np.linspace(-.5, .5, resolution)
@@ -93,7 +95,7 @@ class PerfectCircle(qtw.QWidget):
     a Fibonacci Spiral to make its points.
     """
 
-    def __init__(self, settings, radius=1.0, resolution=50, mode="base_points"):
+    def __init__(self, settings, driver, radius=1.0, resolution=50, mode="base_points"):
         if mode == "base_points":
             r_key = "bp_radius"
             label = "Radius of the base points"
@@ -114,7 +116,7 @@ class PerfectCircle(qtw.QWidget):
 
         layout.addWidget(cw.SettingsEntryBox(
             self.settings, r_key, float, validator=qtg.QDoubleValidator(0.0, 100000, 6),
-            label=label
+            label=label, callback=driver.try_auto_retrace
         ))
 
     def __call__(self, seed):
@@ -132,7 +134,7 @@ class PerfectUniformSphere(qtw.QWidget):
     one dimension as phi and the other as theta.
     """
 
-    def __init__(self, settings, ray_length=1.0, angular_cutoff=90.0):
+    def __init__(self, settings, driver, ray_length=1.0, angular_cutoff=90.0):
         super().__init__()
         self.settings = settings
         self.settings.establish_defaults(ray_length=ray_length, angular_cutoff=angular_cutoff)
@@ -140,11 +142,12 @@ class PerfectUniformSphere(qtw.QWidget):
         self.setLayout(layout)
 
         layout.addWidget(cw.SettingsEntryBox(
-            self.settings, "ray_length", float, validator=qtg.QDoubleValidator(0.0, 100000, 6)
+            self.settings, "ray_length", float, validator=qtg.QDoubleValidator(0.0, 100000, 6),
+            callback=driver.try_auto_retrace
         ))
         layout.addWidget(cw.SettingsEntryBox(
             self.settings, "angular_cutoff", float, validator=qtg.QDoubleValidator(0.0, 180.0, 6),
-            label="Angular Cutoff (degrees)"
+            label="Angular Cutoff (degrees)", callback=driver.try_auto_retrace
         ))
 
     def __call__(self, seed):
@@ -182,7 +185,7 @@ class PerfectLambertianSphere(qtw.QWidget):
     one dimension as phi and the other as theta.
     """
 
-    def __init__(self, settings, ray_length=1.0, angular_cutoff=90.0):
+    def __init__(self, settings, driver, ray_length=1.0, angular_cutoff=90.0):
         super().__init__()
         self.settings = settings
         self.settings.establish_defaults(ray_length=ray_length, angular_cutoff=angular_cutoff)
@@ -190,11 +193,12 @@ class PerfectLambertianSphere(qtw.QWidget):
         self.setLayout(layout)
 
         layout.addWidget(cw.SettingsEntryBox(
-            self.settings, "ray_length", float, validator=qtg.QDoubleValidator(0.0, 100000, 6)
+            self.settings, "ray_length", float, validator=qtg.QDoubleValidator(0.0, 100000, 6),
+            callback=driver.try_auto_retrace
         ))
         layout.addWidget(cw.SettingsEntryBox(
             self.settings, "angular_cutoff", float, validator=qtg.QDoubleValidator(0.0, 90.0, 6),
-            label="Angular Cutoff (degrees)"
+            label="Angular Cutoff (degrees)", callback=driver.try_auto_retrace
         ))
 
     def __call__(self, seed):
@@ -239,7 +243,7 @@ class PixelatedLambertianSphere(qtw.QWidget):
     to the spherical output, meaning the seed could be used for goal definition with a square goal.
     """
 
-    def __init__(self, settings, ray_length=1.0, resolution=51, angular_cutoff=90.0):
+    def __init__(self, settings, driver, ray_length=1.0, resolution=51, angular_cutoff=90.0):
         super().__init__()
         if resolution % 2 == 0:
             resolution += 1  # doesn't work if resolution isn't odd.
@@ -250,11 +254,12 @@ class PixelatedLambertianSphere(qtw.QWidget):
         self.setLayout(layout)
 
         layout.addWidget(cw.SettingsEntryBox(
-            self.settings, "ray_length", float, validator=qtg.QDoubleValidator(0.0, 100000, 6)
+            self.settings, "ray_length", float, validator=qtg.QDoubleValidator(0.0, 100000, 6),
+            callback=driver.try_auto_retrace
         ))
         layout.addWidget(cw.SettingsEntryBox(
             self.settings, "angular_cutoff", float, validator=qtg.QDoubleValidator(0.0, 90.0, 6),
-            label="Angular Cutoff (degrees)", callback=self._refresh_cdf
+            label="Angular Cutoff (degrees)", callback=[self._refresh_cdf, driver.try_auto_retrace]
         ))
 
         self._cdf = None

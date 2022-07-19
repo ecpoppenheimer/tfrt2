@@ -384,9 +384,10 @@ class MPLWidget(qtw.QWidget):
 
 
 class ParameterController(qtw.QWidget):
-    def __init__(self, component):
+    def __init__(self, component, client):
         super().__init__()
         self.component = component
+        self.client = client
         self._suppress_updates = False
         self.smoother = None
 
@@ -557,10 +558,10 @@ class ParameterController(qtw.QWidget):
         self.update_everything()
 
     def update_everything(self):
-        self.component.update()
-
         # component.update respects constraints, which can hide changes, so lets re-update this item to reflect that...
         # Nope, because constraints can be more complicated than that.  Update the entire display.
+        self.client.update_optics()
+        self.client.try_auto_retrace()
         self.refresh_parameters()
         try:
             self.component.drawer.draw()
@@ -578,7 +579,7 @@ class ParameterController(qtw.QWidget):
 
 
 class OpticController(qtw.QWidget):
-    def __init__(self, component, client, system_path):
+    def __init__(self, component, driver, system_path):
         """
         It is the responsibility of the user to establish default settings.
 
@@ -597,7 +598,7 @@ class OpticController(qtw.QWidget):
         """
         super().__init__()
         self.component = component
-        self.client = client
+        self.driver = driver
         self._params_valid = hasattr(self.component, "parameters")
         settings_keys = set(self.component.settings.dict.keys())
         self._input_valid = "mesh_input_path" in settings_keys
@@ -649,7 +650,8 @@ class OpticController(qtw.QWidget):
     def load_zero_points(self):
         if self._input_valid:
             self.component.load(self.component.settings.mesh_input_path)
-            self.component.update()
+            self.driver.update_optics()
+            self.driver.try_auto_redraw()
             print(f"loaded mesh for {self.component.name}: {self.component.settings.mesh_input_path}")
 
     def save_parameters(self):
@@ -671,13 +673,10 @@ class OpticController(qtw.QWidget):
                     params = pickle.load(inFile)
                     self.component.param_assign(params)
                 print(f"loaded parameters for {self.component.name}: {self.component.settings.parameters_path}")
-                self.component.update()
-                try:
-                    self.component.drawer.draw()
-                except AttributeError:
-                    pass
-                if self.client is not None:
-                    self.client.parameters_pane.refresh_parameters()
+                self.driver.update_optics()
+                self.driver.try_auto_redraw()
+                if self.driver is not None:
+                    self.driver.parameters_pane.refresh_parameters()
             except Exception:
                 print(f"Exception while trying to load parameters")
                 print(traceback.format_exc())
@@ -685,7 +684,8 @@ class OpticController(qtw.QWidget):
     def load_mesh(self):
         if self._input_valid:
             self.component.load(self.component.settings.mesh_input_path)
-            self.component.update()
+            self.driver.update_optics()
+            self.driver.try_auto_redraw()
             try:
                 self.component.drawer.draw()
             except Exception:

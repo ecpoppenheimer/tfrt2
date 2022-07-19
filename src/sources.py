@@ -4,7 +4,6 @@ import tfquaternion as tfq
 import PyQt5.QtGui as qtg
 import PyQt5.QtWidgets as qtw
 
-import tfrt2.src.settings as settings
 import tfrt2.src.component_widgets as cw
 import tfrt2.src.wavelength as wv
 
@@ -63,7 +62,8 @@ class Source3D:
     dimension = 3
 
     def __init__(
-        self, settings, wavelength, system_path, base_points=None, angles=None, aperture=None, aperture_distance=1.0
+        self, driver, system_path, settings, wavelength, base_points=None, angles=None, aperture=None,
+        aperture_distance=1.0
     ):
         """
         Parameters
@@ -100,14 +100,15 @@ class Source3D:
             The distance between the optic center and the aperture.  Defaults to 1.  Only has an effect if aperture
             is specified.
         """
+        self.driver = driver
         self.settings = settings
-        self.name = None
         self.settings.establish_defaults(
             ray_count=100,
             center=[0.0, 0.0, 0.0],
             angle=[0.0, 0.0, 1.0],
         )
-        self.controller_widgets = [SourceController(self)]
+        self.source_controller = SourceController(self)
+        self.controller_widgets = [self.source_controller]
         self.system_path = system_path
 
         self.make_wavelengths = self._process_wavelength(wavelength)
@@ -215,7 +216,8 @@ class Source3D:
                 wavelength = float(wavelength)
                 self.settings.establish_defaults(wavelength=wavelength)
                 self.controller_widgets.append(cw.SettingsEntryBox(
-                    self.settings, "wavelength", float, validator=qtg.QDoubleValidator(1e-3, 1e6, 8)
+                    self.settings, "wavelength", float, validator=qtg.QDoubleValidator(1e-3, 1e6, 8),
+                    callback=self.source_controller.redraw
                 ))
                 return self._make_constant_wavelengths
             except TypeError:
@@ -257,19 +259,24 @@ class SourceController(qtw.QWidget):
 
         sub_layout = qtw.QHBoxLayout()
         sub_layout.addWidget(cw.SettingsEntryBox(
-            self.component.settings, "ray_count", int, qtg.QIntValidator(1, 100000)
+            self.component.settings, "ray_count", int, qtg.QIntValidator(1, 100000), self.redraw
         ))
         self.component.settings.establish_defaults(source_active=True)
         sub_layout.addWidget(cw.SettingsCheckBox(
-            self.component, "Active", "source_active"
+            self.component, "Active", "source_active", self.redraw
         ))
         main_layout.addLayout(sub_layout)
         main_layout.addWidget(cw.SettingsVectorBox(
-            self.component, "center", "center", self.component.update_translation
+            self.component, "center", "center", [self.component.update_translation, self.redraw]
         ))
         main_layout.addWidget(cw.SettingsVectorBox(
-            self.component, "central angle", "angle", self.component.update_rotation
+            self.component, "central angle", "angle", [self.component.update_rotation, self.redraw]
         ))
+
+    def redraw(self):
+        self.component.update()
+        self.component.driver.trace_pane.redraw()
+        self.component.driver.try_auto_retrace()
 
 
 class SpectrumController(qtw.QWidget):
