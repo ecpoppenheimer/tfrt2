@@ -203,6 +203,11 @@ class TraceServer(qtn.QTcpServer):
             self.send_nonfatal_error("reloading file")
 
     def clean_temp(self):
+        # Make sure the temp folder exists
+        if not self.temp_path.exists():
+            self.temp_path.mkdir(exist_ok=True)
+
+        # Empty it
         for f in self.temp_path.iterdir():
             if f.is_file():
                 try:
