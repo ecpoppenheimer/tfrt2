@@ -5,7 +5,7 @@ import PyQt5.QtGui as qtg
 import numpy as np
 
 import cumdistf
-import tfrt2.src.component_widgets as cw
+import tfrt2.component_widgets as cw
 
 
 class Square(qtw.QWidget):

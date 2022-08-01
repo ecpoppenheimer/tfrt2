@@ -1,8 +1,8 @@
-import tfrt2.src.optical_system as optical_system
-import tfrt2.src.sources as sources
-import tfrt2.src.distributions as distributions
-import tfrt2.src.wavelength as wavelength
-import tfrt2.src.materials as materials
+import tfrt2.optical_system as optical_system
+import tfrt2.sources as sources
+import tfrt2.distributions as distributions
+import tfrt2.wavelength as wavelength
+import tfrt2.materials as materials
 
 
 def get_system(driver):

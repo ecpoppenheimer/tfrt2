@@ -1,6 +1,4 @@
 # Disable redundant TF warnings
-import tcp_base
-
 if __name__ == "__main__":
     import logging
     import os
@@ -19,8 +17,8 @@ import numpy as np
 import PyQt5.QtNetwork as qtn
 import PyQt5.QtWidgets as qtw
 
-import tfrt2.src.tcp_base as tcp
-import tfrt2.src.settings as settings
+import tfrt2.tcp_base as tcp
+import tfrt2.settings as settings
 
 
 class TraceServer(qtn.QTcpServer):
@@ -50,21 +48,20 @@ class TraceServer(qtn.QTcpServer):
         }
 
     def got_connection(self):
-        client_socket = tcp_base.TcpDataPacker(
+        client_socket = tcp.TcpDataPacker(
             self.nextPendingConnection(),
-            tcp_base.SERVER_ACK,
-            tcp_base.CLIENT_ACK,
+            tcp.SERVER_ACK,
+            tcp.CLIENT_ACK,
             verbose=True
         )
         if self.client_socket is None:
             self.client_socket = client_socket
             self.client_socket.data_ready.sig.connect(self.data_received)
-            self.client_socket.errorOccurred.connect(self.socket_closed_remotely)
             self.client_socket.disconnected.connect(self.socket_closed_remotely)
         else:
             # An incoming connection was made, but we already have a connection
-            client_socket.write(tcp_base.SERVER_FULL)
-            client_socket.write(tcp_base.SERVER_FULL)
+            client_socket.write(tcp.SERVER_FULL)
+            client_socket.write(tcp.SERVER_FULL)
             client_socket.close()
 
     def data_received(self, header, data):
@@ -73,7 +70,7 @@ class TraceServer(qtn.QTcpServer):
         except Exception:
             self.send_nonfatal_error("receiving data from client.")
 
-    def socket_closed_remotely(self, _):
+    def socket_closed_remotely(self, _=None):
         self.client_socket = None
         self.cached_component_settings = None
         self.optical_system = None
@@ -90,9 +87,9 @@ class TraceServer(qtn.QTcpServer):
     def set_main_settings(self, data):
         try:
             self.settings.update(pickle.loads(data))
-            self.client_socket.write(tcp.SERVER_M_SET_ACK, tcp_base.TRUE)
+            self.client_socket.write(tcp.SERVER_M_SET_ACK, tcp.TRUE)
         except Exception:
-            self.client_socket.write(tcp.SERVER_M_SET_ACK, tcp_base.FALSE)
+            self.client_socket.write(tcp.SERVER_M_SET_ACK, tcp.FALSE)
             self.send_nonfatal_error("updating main settings")
 
     def set_system_settings(self, data):
@@ -109,9 +106,9 @@ class TraceServer(qtn.QTcpServer):
             # Save the settings into a file.  They will be applied once refresh_system is called
             settings.Settings(**data).save(str(self.temp_path / "settings.data"))
 
-            self.client_socket.write(tcp.SERVER_S_SET_ACK, tcp_base.TRUE)
+            self.client_socket.write(tcp.SERVER_S_SET_ACK, tcp.TRUE)
         except Exception:
-            self.client_socket.write(tcp.SERVER_S_SET_ACK, tcp_base.FALSE)
+            self.client_socket.write(tcp.SERVER_S_SET_ACK, tcp.FALSE)
             self.send_nonfatal_error("updating system settings")
 
     def receive_ftp(self, data):
@@ -187,9 +184,9 @@ class TraceServer(qtn.QTcpServer):
             for k in self.received_files.keys():
                 self.received_files[k] = False
 
-            self.client_socket.write(tcp.SERVER_SYS_L_ACK, tcp_base.TRUE)
+            self.client_socket.write(tcp.SERVER_SYS_L_ACK, tcp.TRUE)
         except Exception:
-            self.client_socket.write(tcp.SERVER_SYS_L_ACK, tcp_base.FALSE)
+            self.client_socket.write(tcp.SERVER_SYS_L_ACK, tcp.FALSE)
             self.send_nonfatal_error("refreshing system")
 
     def reload_file(self, file_type, component_name, full_path):
@@ -238,9 +235,9 @@ class TraceServer(qtn.QTcpServer):
                     self.optical_system.parts[key].param_assign(value)
             else:
                 self.cached_parameters = pickle.loads(data)
-            self.client_socket.write(tcp.SERVER_PARAM_ACK, tcp_base.TRUE)
+            self.client_socket.write(tcp.SERVER_PARAM_ACK, tcp.TRUE)
         except Exception:
-            self.client_socket.write(tcp.SERVER_PARAM_ACK, tcp_base.FALSE)
+            self.client_socket.write(tcp.SERVER_PARAM_ACK, tcp.FALSE)
             self.send_nonfatal_error("receiving parameters")
 
 

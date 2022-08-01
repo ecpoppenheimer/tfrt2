@@ -37,8 +37,8 @@ import numpy as np
 import matplotlib as mpl
 import pyvista as pv
 
-import tfrt2.src.wavelength as wavelength
-import tfrt2.src.mesh_tools as mt
+import tfrt2.wavelength as wavelength
+import tfrt2.mesh_tools as mt
 
 
 class RayDrawer3D:

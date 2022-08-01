@@ -2,7 +2,7 @@ import pathlib
 
 import numpy as np
 
-import tfrt2.src.wavelength as wv
+import tfrt2.wavelength as wv
 
 path = pathlib.Path("./spd_files")
 output_dir = pathlib.Path(".")

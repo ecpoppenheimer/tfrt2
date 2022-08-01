@@ -2,8 +2,8 @@ from pathlib import Path
 
 import tensorflow as tf
 
-import tfrt2.src.settings as settings
-from tfrt2.src.trace_engine import TraceEngine3D
+import tfrt2.settings as settings
+from tfrt2.trace_engine import TraceEngine3D
 
 
 class OpticalSystem(TraceEngine3D):

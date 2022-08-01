@@ -117,10 +117,8 @@ class TcpDataPacker:
         return getattr(self._socket, name)
 
     def _read_some(self):
-        print(f"read some called")
         while self._socket.bytesAvailable() >= INT_SIZE:
             if self.validated:
-                print(f"performing a main read with {self._socket.bytesAvailable()} available bytes")
                 if not self._chunk_in_progress:
                     self._chunk_in_progress = True
                     self._required_bytes = int.from_bytes(self._socket.read(INT_SIZE), byteorder='little', signed=False)
@@ -128,11 +126,9 @@ class TcpDataPacker:
                 # required_bytes is the size of the data chunk, but we also have to be able to read off the header.
                 # If we don't have enough data to do both, break the loop.
                 if self._socket.bytesAvailable() < self._required_bytes + HEADER_SIZE:
-                    print("chunk incomplete")
                     break
                 else:
                     # Have enough data to read off a header and data chunk.
-                    print("chunk obtained...")
                     self._chunk_in_progress = False
                     header = self._socket.read(HEADER_SIZE)
                     data = self._socket.read(self._required_bytes)

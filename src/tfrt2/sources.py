@@ -6,8 +6,8 @@ import tfquaternion as tfq
 import PyQt5.QtGui as qtg
 import PyQt5.QtWidgets as qtw
 
-import tfrt2.src.component_widgets as cw
-import tfrt2.src.wavelength as wv
+import tfrt2.component_widgets as cw
+import tfrt2.wavelength as wv
 
 
 class Source3D:

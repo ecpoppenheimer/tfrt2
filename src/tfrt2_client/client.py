@@ -19,12 +19,12 @@ import PyQt5.QtCore as qtc
 import PyQt5.QtGui as qtg
 import pyvistaqt as pvqt
 
-import tfrt2.src.drawing as drawing
-import tfrt2.src.settings as settings
-import tfrt2.src.component_widgets as component_widgets
-import tfrt2.src.wavelength as wavelength
-import tfrt2.src.optics as optics
-import tfrt2.src.client_TCP_widget as tcp_widget
+import tfrt2.drawing as drawing
+import tfrt2.settings as settings
+import tfrt2.component_widgets as component_widgets
+import tfrt2.wavelength as wavelength
+import tfrt2.optics as optics
+import tfrt2.client_TCP_widget as tcp_widget
 
 
 class OpticClientWindow(qtw.QWidget):
@@ -35,7 +35,7 @@ class OpticClientWindow(qtw.QWidget):
         self.control_pane_width = 350
 
         # Initialize the settings persistent data class
-        self.settings_path = str(pathlib.Path(".") / "settings.dat")
+        self.settings_path = str(pathlib.Path(__file__).parent / "settings.dat")
         self.settings = settings.Settings()
         self.settings.establish_defaults(system_path=None)
         try:
@@ -185,7 +185,7 @@ class OpticClientWindow(qtw.QWidget):
             try:
                 parent_path = str(pathlib.Path(self.settings.system_path))
             except Exception:
-                parent_path = str(pathlib.Path("."))
+                parent_path = str(pathlib.Path(".."))
             dialog = qtw.QFileDialog(directory=parent_path)
             dialog.setFileMode(qtw.QFileDialog.Directory)
             if dialog.exec_():

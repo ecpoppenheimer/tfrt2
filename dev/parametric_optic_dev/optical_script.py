@@ -2,11 +2,9 @@ import numpy as np
 import pyvista as pv
 import pathlib
 
-import tfrt2.src.settings as settings
-import tfrt2.src.materials as materials
-import tfrt2.src.optics as optics
-import tfrt2.src.vector_generator as vg
-from tfrt2.src.optical_system import OpticalSystem
+import tfrt2.optics as optics
+import tfrt2.vector_generator as vg
+from tfrt2.optical_system import OpticalSystem
 
 
 def get_system(client):

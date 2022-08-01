@@ -18,7 +18,7 @@ from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 
-import tfrt2.src.component_widgets as cw
+import tfrt2.component_widgets as cw
 import cumdistf
 
 

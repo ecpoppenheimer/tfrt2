@@ -5,11 +5,10 @@ import traceback
 import PyQt5.QtWidgets as qtw
 import PyQt5.QtGui as qtg
 import PyQt5.QtNetwork as qtn
-import numpy as np
 
-import tcp_base
-import tfrt2.src.component_widgets as cw
-import tfrt2.src.tcp_base as tcp
+import tfrt2.tcp_base as tcp_base
+import tfrt2.component_widgets as cw
+import tfrt2.tcp_base as tcp
 
 
 class ClientTCPWidget(qtw.QWidget):

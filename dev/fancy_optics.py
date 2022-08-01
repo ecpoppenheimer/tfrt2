@@ -12,7 +12,7 @@ import tensorflow as tf
 import tfrt.boundaries as boundaries
 import tfrt.mesh_tools as mt
 import tfrt.engine as engine
-import tfrt2.src.settings as settings
+import tfrt2 as settings
 
 
 class LinearOptic(boundaries.MasterSlaveParametricTriangleBoundary):

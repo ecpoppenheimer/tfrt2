@@ -3,7 +3,7 @@ import sys
 import PyQt5.QtNetwork as qtn
 import PyQt5.QtWidgets as qtw
 
-from tfrt2.src.client_TCP_widget import DEFAULT_PORT
+from tfrt2.client_TCP_widget import DEFAULT_PORT
 
 
 class EchoServer(qtn.QTcpServer):

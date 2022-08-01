@@ -5,9 +5,9 @@ import PyQt5.QtCore as qtc
 import PyQt5.QtGui as qtg
 import PyQt5.QtWidgets as qtw
 
-import tfrt2.src.mesh_tools as mt
-import tfrt2.src.component_widgets as cw
-import tfrt2.src.drawing as drawing
+import tfrt2.mesh_tools as mt
+import tfrt2.component_widgets as cw
+import tfrt2.drawing as drawing
 
 
 class TriangleOptic:

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-import tfrt2.src.wavelength as wv
+import tfrt2.wavelength as wv
 
 path_root = Path(__file__).parent
 
