@@ -12,6 +12,7 @@ import types
 import sys
 import traceback
 import threading
+import signal
 
 import PyQt5.QtWidgets as qtw
 import PyQt5.QtCore as qtc
@@ -27,6 +28,8 @@ import tfrt2.src.client_TCP_widget as tcp_widget
 
 
 class OpticClientWindow(qtw.QWidget):
+    driver_type = "client"
+
     def __init__(self):
         super().__init__(windowTitle="Linear Mark 5 Dev Client")
         self.control_pane_width = 350
@@ -55,6 +58,7 @@ class OpticClientWindow(qtw.QWidget):
         self._quit = threading.Event()
         self.retrace_button = qtw.QPushButton("Re-trace")
         self.retrace_button.setEnabled(False)
+        self.tcp_widget = None
 
         # Spawn a thread for performing local tracing
         self._update_rays_sig = UpdateRaysSignal()
@@ -136,13 +140,14 @@ class OpticClientWindow(qtw.QWidget):
 
         retrace_toggle = qtw.QCheckBox("Retrace")
         retrace_toggle.setTristate(False)
-        retrace_toggle.stateChanged.connect(self.try_auto_retrace)
+        retrace_toggle.stateChanged.connect(self.toggle_auto_retrace)
         self.settings.establish_defaults(auto_retrace=2)
         retrace_toggle.setCheckState(self.settings.auto_retrace)
         update_layout.addWidget(retrace_toggle)
 
         # The TCP client widget
-        control_layout.addWidget(tcp_widget.Client_TCP_Widget(self))
+        self.tcp_widget = tcp_widget.ClientTCPWidget(self)
+        control_layout.addWidget(self.tcp_widget)
 
         # A selector to choose which set of interface controls are visible
         tab_selector = qtw.QComboBox()
@@ -187,8 +192,14 @@ class OpticClientWindow(qtw.QWidget):
                 selected_files = dialog.selectedFiles()
                 path = selected_files[0]
 
+        if path is None:
+            # Opened a file selection box above, but if the user closes it instead of selecting a file, will get none
+            # here, in which case just do nothing
+            return
+
         # save the system settings now before overwriting or doing anything else
         self.save_system()
+        self.tcp_widget.reset_system()
 
         # load the system at this location
         try:
@@ -224,6 +235,7 @@ class OpticClientWindow(qtw.QWidget):
 
         # Update the control panes with the new system
         self.populate_panes_from_system(self.optical_system)
+        self.tcp_widget.check_system_state()
 
     def populate_panes_from_system(self, system):
         self.display_pane.update_with_system(system)
@@ -253,8 +265,11 @@ class OpticClientWindow(qtw.QWidget):
         self._start_local_trace.set()
 
     def try_auto_retrace(self):
-        if bool(self.settings.auto_update_on_redraw) and self.optical_system is not None:
+        if bool(self.settings.auto_retrace) and self.optical_system is not None:
             self.retrace()
+
+    def toggle_auto_retrace(self, state):
+        self.settings.auto_retrace = int(state)
 
     def _local_trace_loop(self):
         while not self._quit.is_set():
@@ -296,6 +311,7 @@ class OpticClientWindow(qtw.QWidget):
 
     def quit(self):
         self._quit.set()
+        self.tcp_widget.quit()
         try:
             self.settings.save(self.settings_path)
         except Exception:
@@ -597,6 +613,7 @@ def main(app, window):
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     app = make_app()
     win = OpticClientWindow()
     main(app, win)

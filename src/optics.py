@@ -84,7 +84,6 @@ class TriangleOptic:
         self.name = None
         self.mat_in = mat_in or 0
         self.mat_out = mat_out or 0
-        self.controller_widgets = []
         self.vertices = None
         self.faces = None
         self.driver = driver
@@ -98,7 +97,9 @@ class TriangleOptic:
             else:
                 self.from_mesh(mesh)
 
-        self.controller_widgets.append(cw.OpticController(self, driver, system_path))
+        self.controller_widgets = []
+        if self.driver.driver_type == "client":
+            self.controller_widgets.append(cw.OpticController(self, driver, system_path))
 
     def load(self, in_path):
         self.from_mesh(pv.read(in_path))
@@ -306,7 +307,14 @@ class ParametricTriangleOptic(TriangleOptic):
             driver, system_path, settings, None, mat_in=mat_in, mat_out=mat_out, hold_load=True, flip_norm=flip_norm
         )
 
-        if self.enable_vum or self.enable_accumulator:
+        self.settings.establish_defaults(
+            vum_origin=(0, 0, 0),
+            vum_active=True,
+            accumulator_origin=(0, 0, 0),
+            accumulator_active=True
+        )
+
+        if (self.enable_vum or self.enable_accumulator) and self.driver.driver_type == "client":
             self.mt_controller = cw.MeshTricksController(self, driver)
             self.controller_widgets.append(self.mt_controller)
         else:
@@ -449,7 +457,8 @@ class ParametricTriangleOptic(TriangleOptic):
                 active_vertices
             )
 
-        self.mt_controller.update_displays()
+        if self.mt_controller:
+            self.mt_controller.update_displays()
 
     def update(self, force=False):
         if not self.frozen or force:
@@ -577,7 +586,7 @@ class ParametricTriangleOptic(TriangleOptic):
         else:
             constraints = constraints
         for c in constraints:
-            if isinstance(c, qtw.QWidget):
+            if isinstance(c, qtw.QWidget) and self.driver.driver_type == "client":
                 self.controller_widgets.append(c)
         return constraints
 
@@ -647,8 +656,8 @@ class TrigBoundaryDisplayController(qtw.QWidget):
         self.build_entry_box(main_layout, 5, "norm_arrow_length", float, qtg.QDoubleValidator(0, 1e6, 5))
 
         if self._params_valid:
-            self.build_check_box(main_layout, 5, "parameter_arrow_visibility")
-            self.build_entry_box(main_layout, 6, "parameter_arrow_length", float, qtg.QDoubleValidator(0, 1e6, 5))
+            self.build_check_box(main_layout, 6, "parameter_arrow_visibility")
+            self.build_entry_box(main_layout, 7, "parameter_arrow_length", float, qtg.QDoubleValidator(0, 1e6, 5))
 
         self._permit_draws = True
 

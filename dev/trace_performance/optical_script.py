@@ -32,15 +32,14 @@ class LocalSystem(OpticalSystem):
             visible=True,
             color="cyan",
             show_edges=False,
-            mesh_output_path=str(pathlib.Path(self.self_path) / "test_output.stl"),
-            mesh_input_path=str(pathlib.Path(self.self_path) / "test_input.stl"),
+            mesh_output_path=str(pathlib.Path(self.self_path) / "entrance_output.stl"),
+            mesh_input_path=str(pathlib.Path(self.self_path) / "mesh_input.stl"),
         )
         self.settings.lens.establish_defaults(
             visible=True,
             color="cyan",
             show_edges=True,
-            mesh_output_path=str(pathlib.Path(self.self_path) / "test_output.stl"),
-            mesh_input_path=str(pathlib.Path(self.self_path) / "test_input.stl"),
+            mesh_output_path=str(pathlib.Path(self.self_path) / "lens_output.stl"),
         )
         self.settings.target.establish_defaults(
             visible=False,
@@ -55,8 +54,7 @@ class LocalSystem(OpticalSystem):
         entrance = optics.TriangleOptic(
             self.driver,
             self.self_path,
-            self.settings.lens,
-            mesh=pv.Disc((0.0, 0.0, entrance_height), inner=0.0, outer=radius, c_res=32).triangulate(),
+            self.settings.entrance,
             mat_in=1,
             mat_out=0,
             flip_norm=True,
@@ -84,6 +82,7 @@ class LocalSystem(OpticalSystem):
             self.driver, self.self_path, self.settings.target,
             mesh=pv.Plane((0, 0, target_distance), (0, 0, 1), 10000, 10000, 1, 1).triangulate()
         )
+
         source = sources.Source3D(
             self.driver, self.self_path, self.settings.source, "",
             base_points=distributions.Square(self.settings.source, driver, x_width=.05, y_width=.05),

@@ -35,14 +35,12 @@ class LocalSystem(OpticalSystem):
             color="cyan",
             show_edges=True,
             mesh_output_path=str(pathlib.Path(self.self_path) / "test_output.stl"),
-            mesh_input_path=str(pathlib.Path(self.self_path) / "test_input.stl"),
         )
         self.settings.lens2.establish_defaults(
             visible=True,
             color="cyan",
             show_edges=True,
-            mesh_output_path=str(pathlib.Path(self.self_path) / "test_output.stl"),
-            mesh_input_path=str(pathlib.Path(self.self_path) / "test_input.stl"),
+            mesh_output_path=str(pathlib.Path(self.self_path) / "test_output2.stl"),
         )
         self.settings.target.establish_defaults(
             visible=False,

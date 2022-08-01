@@ -28,18 +28,19 @@ class Square(qtw.QWidget):
         self.settings.establish_defaults(**{x_key: x_width/2, y_key: y_width/2})
         self._x_key = x_key
         self._y_key = y_key
-        layout = qtw.QGridLayout()
-        self.setLayout(layout)
+        if driver.driver_type == "client":
+            layout = qtw.QGridLayout()
+            self.setLayout(layout)
 
-        layout.addWidget(qtw.QLabel(label), 0, 0, 1, 2)
-        layout.addWidget(cw.SettingsEntryBox(
-            self.settings, x_key, float, validator=qtg.QDoubleValidator(0.0, 100000, 6), label="x",
-            callback=driver.try_auto_retrace
-        ), 1, 0, 1, 1)
-        layout.addWidget(cw.SettingsEntryBox(
-            self.settings, y_key, float, validator=qtg.QDoubleValidator(0.0, 100000, 6), label="y",
-            callback=driver.try_auto_retrace
-        ), 1, 1, 1, 1)
+            layout.addWidget(qtw.QLabel(label), 0, 0, 1, 2)
+            layout.addWidget(cw.SettingsEntryBox(
+                self.settings, x_key, float, validator=qtg.QDoubleValidator(0.0, 100000, 6), label="x",
+                callback=driver.try_auto_retrace
+            ), 1, 0, 1, 1)
+            layout.addWidget(cw.SettingsEntryBox(
+                self.settings, y_key, float, validator=qtg.QDoubleValidator(0.0, 100000, 6), label="y",
+                callback=driver.try_auto_retrace
+            ), 1, 1, 1, 1)
 
     def __call__(self, seed):
         return (seed - .5) * ((self.settings.dict[self._x_key], self.settings.dict[self._y_key]),)
@@ -68,13 +69,15 @@ class PixelatedCircle(qtw.QWidget):
         self.settings = settings
         self._r_key = r_key
         self.settings.establish_defaults(**{r_key: radius})
-        layout = qtw.QVBoxLayout()
-        self.setLayout(layout)
 
-        layout.addWidget(cw.SettingsEntryBox(
-            self.settings, r_key, float, validator=qtg.QDoubleValidator(0.0, 100000, 6),
-            label=label, callback=driver.try_auto_retrace
-        ))
+        if driver.driver_type == "client":
+            layout = qtw.QVBoxLayout()
+            self.setLayout(layout)
+
+            layout.addWidget(cw.SettingsEntryBox(
+                self.settings, r_key, float, validator=qtg.QDoubleValidator(0.0, 100000, 6),
+                label=label, callback=driver.try_auto_retrace
+            ))
 
         x = np.linspace(-.5, .5, resolution)
         density = x[:, None]**2 + x[None, :]**2 <= .25
@@ -111,13 +114,15 @@ class PerfectCircle(qtw.QWidget):
         self._r_key = r_key
         self._factor = 2 * math.pi * (1 + 5**0.5)
         self.settings.establish_defaults(**{r_key: radius})
-        layout = qtw.QVBoxLayout()
-        self.setLayout(layout)
 
-        layout.addWidget(cw.SettingsEntryBox(
-            self.settings, r_key, float, validator=qtg.QDoubleValidator(0.0, 100000, 6),
-            label=label, callback=driver.try_auto_retrace
-        ))
+        if driver.driver_type == "client":
+            layout = qtw.QVBoxLayout()
+            self.setLayout(layout)
+
+            layout.addWidget(cw.SettingsEntryBox(
+                self.settings, r_key, float, validator=qtg.QDoubleValidator(0.0, 100000, 6),
+                label=label, callback=driver.try_auto_retrace
+            ))
 
     def __call__(self, seed):
         r = self.settings.dict[self._r_key] * np.sqrt(seed[:, 0]).reshape((-1, 1))
@@ -138,17 +143,19 @@ class PerfectUniformSphere(qtw.QWidget):
         super().__init__()
         self.settings = settings
         self.settings.establish_defaults(ray_length=ray_length, angular_cutoff=angular_cutoff)
-        layout = qtw.QVBoxLayout()
-        self.setLayout(layout)
 
-        layout.addWidget(cw.SettingsEntryBox(
-            self.settings, "ray_length", float, validator=qtg.QDoubleValidator(0.0, 100000, 6),
-            callback=driver.try_auto_retrace
-        ))
-        layout.addWidget(cw.SettingsEntryBox(
-            self.settings, "angular_cutoff", float, validator=qtg.QDoubleValidator(0.0, 180.0, 6),
-            label="Angular Cutoff (degrees)", callback=driver.try_auto_retrace
-        ))
+        if driver.driver_type == "client":
+            layout = qtw.QVBoxLayout()
+            self.setLayout(layout)
+
+            layout.addWidget(cw.SettingsEntryBox(
+                self.settings, "ray_length", float, validator=qtg.QDoubleValidator(0.0, 100000, 6),
+                callback=driver.try_auto_retrace
+            ))
+            layout.addWidget(cw.SettingsEntryBox(
+                self.settings, "angular_cutoff", float, validator=qtg.QDoubleValidator(0.0, 180.0, 6),
+                label="Angular Cutoff (degrees)", callback=driver.try_auto_retrace
+            ))
 
     def __call__(self, seed):
         # Phi will go from 1 to cos(angular_cutoff), and the proper cdf is just arccos.
@@ -189,17 +196,19 @@ class PerfectLambertianSphere(qtw.QWidget):
         super().__init__()
         self.settings = settings
         self.settings.establish_defaults(ray_length=ray_length, angular_cutoff=angular_cutoff)
-        layout = qtw.QVBoxLayout()
-        self.setLayout(layout)
 
-        layout.addWidget(cw.SettingsEntryBox(
-            self.settings, "ray_length", float, validator=qtg.QDoubleValidator(0.0, 100000, 6),
-            callback=driver.try_auto_retrace
-        ))
-        layout.addWidget(cw.SettingsEntryBox(
-            self.settings, "angular_cutoff", float, validator=qtg.QDoubleValidator(0.0, 90.0, 6),
-            label="Angular Cutoff (degrees)", callback=driver.try_auto_retrace
-        ))
+        if driver.driver_type == "client":
+            layout = qtw.QVBoxLayout()
+            self.setLayout(layout)
+
+            layout.addWidget(cw.SettingsEntryBox(
+                self.settings, "ray_length", float, validator=qtg.QDoubleValidator(0.0, 100000, 6),
+                callback=driver.try_auto_retrace
+            ))
+            layout.addWidget(cw.SettingsEntryBox(
+                self.settings, "angular_cutoff", float, validator=qtg.QDoubleValidator(0.0, 90.0, 6),
+                label="Angular Cutoff (degrees)", callback=driver.try_auto_retrace
+            ))
 
     def __call__(self, seed):
         # Phi will go from 1 to cos(angular_cutoff).
@@ -250,17 +259,18 @@ class PixelatedLambertianSphere(qtw.QWidget):
         self._resolution = resolution
         self.settings = settings
         self.settings.establish_defaults(ray_length=ray_length, angular_cutoff=angular_cutoff)
-        layout = qtw.QVBoxLayout()
-        self.setLayout(layout)
+        if driver.driver_type == "client":
+            layout = qtw.QVBoxLayout()
+            self.setLayout(layout)
 
-        layout.addWidget(cw.SettingsEntryBox(
-            self.settings, "ray_length", float, validator=qtg.QDoubleValidator(0.0, 100000, 6),
-            callback=driver.try_auto_retrace
-        ))
-        layout.addWidget(cw.SettingsEntryBox(
-            self.settings, "angular_cutoff", float, validator=qtg.QDoubleValidator(0.0, 90.0, 6),
-            label="Angular Cutoff (degrees)", callback=[self._refresh_cdf, driver.try_auto_retrace]
-        ))
+            layout.addWidget(cw.SettingsEntryBox(
+                self.settings, "ray_length", float, validator=qtg.QDoubleValidator(0.0, 100000, 6),
+                callback=driver.try_auto_retrace
+            ))
+            layout.addWidget(cw.SettingsEntryBox(
+                self.settings, "angular_cutoff", float, validator=qtg.QDoubleValidator(0.0, 90.0, 6),
+                label="Angular Cutoff (degrees)", callback=[self._refresh_cdf, driver.try_auto_retrace]
+            ))
 
         self._cdf = None
         self._refresh_cdf()
@@ -300,8 +310,6 @@ class PixelatedLambertianSphere(qtw.QWidget):
             cos_phi
         ), axis=1)
 
-
-# print(f"distribution x min: {np.amin(rtn[:, 0])}, x max: {np.amax(rtn[:, 0])}, y min: {np.amin(rtn[:, 1])}, y max: {np.amax(rtn[:, 1])}")
 
 def shift(pts, x1, x2, y1, y2):
     m = (y1 - y2) / (x1 - x2)

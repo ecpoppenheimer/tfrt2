@@ -31,23 +31,23 @@ class SettingsEntryBox(qtw.QWidget):
         label.setSizePolicy(qtw.QSizePolicy.Minimum, qtw.QSizePolicy.Minimum)
         layout.addWidget(label)
 
-        edit_box = qtw.QLineEdit()
-        layout.addWidget(edit_box)
-        edit_box.setText(str(settings.dict[key]))
+        self.edit_box = qtw.QLineEdit()
+        layout.addWidget(self.edit_box)
+        self.edit_box.setText(str(settings.dict[key]))
         if validator:
-            edit_box.setValidator(validator)
+            self.edit_box.setValidator(validator)
 
         def edit_callback():
-            value = value_type(edit_box.text())
+            value = value_type(self.edit_box.text())
             settings.dict[key] = value
 
-        edit_box.editingFinished.connect(edit_callback)
+        self.edit_box.editingFinished.connect(edit_callback)
         if callback is not None:
             try:
                 for each in callback:
-                    edit_box.editingFinished.connect(each)
+                    self.edit_box.editingFinished.connect(each)
             except TypeError:
-                edit_box.editingFinished.connect(callback)
+                self.edit_box.editingFinished.connect(callback)
 
 
 class SettingsRangeBox(qtw.QWidget):
@@ -674,7 +674,7 @@ class OpticController(qtw.QWidget):
                     self.component.param_assign(params)
                 print(f"loaded parameters for {self.component.name}: {self.component.settings.parameters_path}")
                 self.driver.update_optics()
-                self.driver.try_auto_redraw()
+                self.driver.redraw()
                 if self.driver is not None:
                     self.driver.parameters_pane.refresh_parameters()
             except Exception:
@@ -685,7 +685,7 @@ class OpticController(qtw.QWidget):
         if self._input_valid:
             self.component.load(self.component.settings.mesh_input_path)
             self.driver.update_optics()
-            self.driver.try_auto_redraw()
+            self.driver.redraw()
             try:
                 self.component.drawer.draw()
             except Exception:

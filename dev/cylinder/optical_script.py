@@ -33,7 +33,6 @@ class LocalSystem(OpticalSystem):
             show_edges=False,
             opacity=.5,
             mesh_output_path=str(pathlib.Path(self.self_path) / "test_output.stl"),
-            mesh_input_path=str(pathlib.Path(self.self_path) / "test_input.stl"),
         )
         self.settings.target.establish_defaults(
             visible=False,

@@ -48,10 +48,10 @@ class LocalSystem(OpticalSystem):
             return np.abs(vertices[:, PARALLEL_AXIS] - v[PARALLEL_AXIS]) < .001
 
         lens = optics.ParametricTriangleOptic(
-            vg.FromVectorVG((0.0, 0.0, 1.0)),
-            self.client,
+            self.driver,
             self.self_path,
             self.settings.lens,
+            vg.FromVectorVG((0.0, 0.0, 1.0)),
             mesh=pv.Plane(direction=(0.0, 0.0, -1.0), i_resolution=5, j_resolution=5).triangulate(),
             mat_in=1,
             mat_out=0,

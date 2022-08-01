@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import tensorflow as tf
 import tfquaternion as tfq
@@ -80,7 +82,7 @@ class Source3D:
             If it is a str:
                 Will be interpreted as a file path to a spectrum.  See wavelength.Spectrum for details.  Will generate a
                 file selector widget to find this spectrum, and this parameter will only be used to set the default
-                spectrum.
+                spectrum.  If given the empty string, will instead default to the default spectrum.
             If it is a float:
                 Will be a constant used for all wavelengths.  Will generate a setting, 'wavelength' and a controller
                 widget to make this parameter adjustable from the client.
@@ -107,8 +109,12 @@ class Source3D:
             center=[0.0, 0.0, 0.0],
             angle=[0.0, 0.0, 1.0],
         )
-        self.source_controller = SourceController(self)
-        self.controller_widgets = [self.source_controller]
+        if self.driver.driver_type == "client":
+            self.source_controller = SourceController(self)
+            self.controller_widgets = [self.source_controller]
+        else:
+            self.source_controller = None
+            self.controller_widgets = None
         self.system_path = system_path
 
         self.make_wavelengths = self._process_wavelength(wavelength)
@@ -121,9 +127,10 @@ class Source3D:
                 # in aperature mode
                 self.make_end_points = self._register_controller(aperture)
                 self.settings.establish_defaults(aperture_distance=aperture_distance)
-                self.controller_widgets.append(cw.SettingsEntryBox(
-                    self.settings, "aperture_distance", float, qtg.QDoubleValidator(1e-9, 1e6, 10)
-                ))
+                if self.driver.driver_type == "client":
+                    self.controller_widgets.append(cw.SettingsEntryBox(
+                        self.settings, "aperture_distance", float, qtg.QDoubleValidator(1e-9, 1e6, 10)
+                    ))
         else:
             if aperture is None:
                 # in angles mode
@@ -192,6 +199,10 @@ class Source3D:
     def update_translation(self):
         self.translation = tf.constant(self.settings.center, dtype=tf.float64)
 
+    def refresh_from_settings(self):
+        self.update_rotation()
+        self.update_translation()
+
     def make_start_points(self, start_seed):
         if self.base_points is None:
             return tf.zeros((start_seed.shape[0], 3), dtype=tf.float64)
@@ -205,36 +216,43 @@ class Source3D:
             return lambda x: tf.constant(wavelength(x), dtype=tf.float64)
         elif type(wavelength) is wv.Spectrum:
             controller = SpectrumController(self, spectrum=wavelength)
-            self.controller_widgets.append(controller)
+            if self.driver.driver_type == "client":
+                self.controller_widgets.append(controller)
             return controller
         elif type(wavelength) is str:
+            if wavelength == "":
+                wavelength = Path(__file__).parent / "default_spectrum.dat"
+                self.settings.spectrum_path = str(wavelength)
             controller = SpectrumController(self, path=wavelength)
-            self.controller_widgets.append(controller)
+            if self.driver.driver_type == "client":
+                self.controller_widgets.append(controller)
             return controller
         else:
             try:
                 wavelength = float(wavelength)
                 self.settings.establish_defaults(wavelength=wavelength)
-                self.controller_widgets.append(cw.SettingsEntryBox(
-                    self.settings, "wavelength", float, validator=qtg.QDoubleValidator(1e-3, 1e6, 8),
-                    callback=self.source_controller.redraw
-                ))
+                if self.driver.driver_type == "client":
+                    self.controller_widgets.append(cw.SettingsEntryBox(
+                        self.settings, "wavelength", float, validator=qtg.QDoubleValidator(1e-3, 1e6, 8),
+                        callback=self.source_controller.redraw
+                    ))
                 return self._make_constant_wavelengths
             except TypeError:
                 try:
                     start, end = wavelength
                     start, end = float(start), float(end)
                     self.settings.establish_defaults(min_wavelength=start, max_wavelength=end)
-                    self.controller_widgets.append(cw.SettingsRangeBox(
-                        self.settings, "wavelength range", "min_wavelength", "max_wavelength", float,
-                        validator=qtg.QDoubleValidator(1e-3, 1e6, 8)
-                    ))
+                    if self.driver.driver_type == "client":
+                        self.controller_widgets.append(cw.SettingsRangeBox(
+                            self.settings, "wavelength range", "min_wavelength", "max_wavelength", float,
+                            validator=qtg.QDoubleValidator(1e-3, 1e6, 8)
+                        ))
                     return self._make_range_wavelengths
                 except TypeError:
                     raise TypeError("Source3D: Could not interpret wavelength.")
 
     def _register_controller(self, arg):
-        if isinstance(arg, qtw.QWidget):
+        if isinstance(arg, qtw.QWidget) and self.driver.driver_type == "client":
             self.controller_widgets.append(arg)
         return arg
 
@@ -297,9 +315,9 @@ class SpectrumController(qtw.QWidget):
             if spectrum is not None:
                 raise ValueError("SpectrumController: Only one of spectrum and path may be specified.")
             self.loadable = True
-            self.settings.establish_defaults(spectrum_filename=str(path))
+            self.settings.establish_defaults(spectrum_path=str(path))
             layout.addWidget(cw.SettingsFileBox(
-                self.settings, "spectrum_filename", self.source.system_path, filter="*.dat", mode="load",
+                self.settings, "spectrum_path", self.source.system_path, filter="*.dat", mode="load",
                 callback=self.load_spectrum
             ))
 
@@ -319,14 +337,10 @@ class SpectrumController(qtw.QWidget):
 
     def load_spectrum(self):
         if self.loadable:
-            try:
-                self.plot_widget.ax.clear()
-                self.spectrum = wv.Spectrum.load(self.settings.spectrum_filename)
-                self.spectrum.plot_to_axis(self.plot_widget.ax, 100)
-                self.plot_widget.draw()
-            except FileNotFoundError:
-                print(f"Error loading the spectrum.  Replaced with a default.")
-                self.spectrum = wv.Spectrum(((wv.VISIBLE_MIN, wv.VISIBLE_MAX), (1.0, 1.0)))
+            self.plot_widget.ax.clear()
+            self.spectrum = wv.Spectrum.load(self.settings.spectrum_path)
+            self.spectrum.plot_to_axis(self.plot_widget.ax, 100)
+            self.plot_widget.draw()
 
     def show_spectrum(self):
         if self.settings.show_spectrum:

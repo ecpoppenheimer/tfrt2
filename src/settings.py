@@ -41,6 +41,19 @@ class Settings:
             self.update(pickle.load(inFile))
         self.upconvert_dicts()
 
+    def reload(self, filename):
+        """
+        Differs from load in that this function will update in place, so references are preserved.
+        """
+        with open(filename, "rb") as inFile:
+            new_data = pickle.load(inFile)
+            for key, value in new_data.items():
+                print(f"settings reload: {key} -> {value}")
+                if type(value is dict):
+                    self.dict[key].update(value)
+                else:
+                    self.dict[key] = value
+
     def save(self, filename):
         with open(filename, "wb") as outFile:
             pickle.dump(self.dict, outFile, pickle.HIGHEST_PROTOCOL)
