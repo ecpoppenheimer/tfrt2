@@ -48,7 +48,6 @@ class Settings:
         with open(filename, "rb") as inFile:
             new_data = pickle.load(inFile)
             for key, value in new_data.items():
-                print(f"settings reload: {key} -> {value}")
                 if type(value is dict):
                     self.dict[key].update(value)
                 else:

@@ -232,6 +232,7 @@ class TraceServer(qtn.QTcpServer):
 
     def ray_trace_for_client(self, _):
         try:
+            print("doing remote raytrace!")
             self.optical_system.update()
             self.optical_system.ray_trace(self.settings.trace_depth)
             all_rays = self.optical_system.all_rays.numpy()

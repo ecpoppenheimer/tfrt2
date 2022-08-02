@@ -29,5 +29,5 @@ x = np.linspace(limits[0], limits[1], 7)
 y = [1, 4, 12, 15, 12, 4, 1]
 
 spectrum = wv.Spectrum((x, y), limits)
-spectrum.save(path_root / "test_yellow.dat")
+spectrum.save(path_root / "test_green.dat")
 #spectrum.standalone_plot()

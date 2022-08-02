@@ -381,7 +381,6 @@ class ClientTCPWidget(qtw.QWidget):
                             "ClientTCPWidget: '|' and '$' are invalid characters to include in names / paths"
                         )
                     remote_filename = name + '|' + key.replace("_path", "") + '|' + str(Path(value).suffix)
-                    print(f"sending an FTP with filename {remote_filename}")
                     self.ftp(remote_filename, value)
                     component_settings[key] = "$PATH$" + remote_filename
                 elif key not in self.component_settings_purges and "path" not in key:

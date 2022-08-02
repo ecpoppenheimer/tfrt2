@@ -84,7 +84,7 @@ class LocalSystem(OpticalSystem):
         )
 
         source = sources.Source3D(
-            self.driver, self.self_path, self.settings.source, "",
+            self.driver, self.self_path, self.settings.source, 550,
             base_points=distributions.Square(self.settings.source, driver, x_width=.05, y_width=.05),
             angles=distributions.PerfectLambertianSphere(self.settings.source, driver)
         )
