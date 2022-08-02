@@ -88,7 +88,8 @@ def cosine_vum(origin, points, vertices, faces):
     inner_product = np.where(np.isnan(inner_product), 1.0, inner_product)
 
     # select movable via selecting two largest ip
-    minimum = np.argmin(inner_product, axis=-1, keepdims=True)
+    # minimum = np.argmin(inner_product, axis=-1, keepdims=True) # I am having version issues, so cannot use keepdims
+    minimum = np.reshape(np.argmin(inner_product, axis=-1), (-1, 1))
     movable = np.tile([[0, 1, 2]], (len(inner_product), 1))
     movable = movable != minimum
 

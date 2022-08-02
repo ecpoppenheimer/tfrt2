@@ -131,7 +131,7 @@ class Spectrum(cdf.CumulativeDistributionFunction1D):
 
     def save(self, filename):
         with open(filename, "wb") as outFile:
-            pickle.dump((self.x_data, self.y_data, self.limits, self.interp_res), outFile, pickle.HIGHEST_PROTOCOL)
+            pickle.dump((self.x_data, self.y_data, self.limits, self.interp_res), outFile)
 
     def __call__(self, rnd):
         return super().__call__(rnd)

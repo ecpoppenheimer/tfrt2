@@ -443,7 +443,6 @@ class ParametricTriangleOptic(TriangleOptic):
     def try_mesh_tools(self):
         vertices = self.get_vertices_from_params(tf.zeros_like(self.parameters))
         if self.enable_vum:
-            print(f"************* eager? {tf.executing_eagerly()}")
             self.vum = tf.constant(mt.cosine_vum(
                 self.settings.vum_origin,
                 tuple(each.numpy() for each in self.face_vertices),

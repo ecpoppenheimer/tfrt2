@@ -56,7 +56,7 @@ class Settings:
 
     def save(self, filename):
         with open(filename, "wb") as outFile:
-            pickle.dump(self.dict, outFile, pickle.HIGHEST_PROTOCOL)
+            pickle.dump(self.dict, outFile)
 
     def upconvert_dicts(self):
         for key in self.keys():
@@ -66,4 +66,4 @@ class Settings:
 
 def save(d, filename):
     with open(filename, "wb") as outFile:
-        pickle.dump(d, outFile, pickle.HIGHEST_PROTOCOL)
+        pickle.dump(d, outFile)

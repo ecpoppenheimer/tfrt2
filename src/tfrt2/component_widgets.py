@@ -660,7 +660,7 @@ class OpticController(qtw.QWidget):
                 with open(self.component.settings.parameters_path, 'wb') as outFile:
                     pickle.dump((
                         self.component.parameters.numpy()
-                    ), outFile, pickle.HIGHEST_PROTOCOL)
+                    ), outFile)
                 print(f"saved parameters for {self.component.name}: {self.component.settings.parameters_path}")
             except Exception:
                 print(f"Exception while trying to save parameters")
