@@ -5,6 +5,7 @@ if __name__ == "__main__":
 
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
     logging.getLogger("tensorflow").setLevel(logging.FATAL)
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 import sys
 from pathlib import Path
@@ -100,8 +101,7 @@ class TraceServer(qtn.QTcpServer):
             for component_settings in data.values():
                 for k, v in component_settings.items():
                     if type(v) is str and "$PATH$" in v:
-                        local_path = v.replace("$PATH$", "")
-                        component_settings[k] = str(self.temp_path / local_path)
+                        component_settings[k] = str(self.ftp_to_path(v.replace("$PATH$", "")))
 
             # Save the settings into a file.  They will be applied once refresh_system is called
             settings.Settings(**data).save(str(self.temp_path / "settings.data"))
@@ -115,7 +115,10 @@ class TraceServer(qtn.QTcpServer):
         local_filename = "FAILED_TO_UNPICKLE_DATA"
         try:
             local_filename, file_stream = pickle.loads(data)
-            full_path = self.temp_path / local_filename
+            try:
+                full_path = self.ftp_to_path(local_filename)
+            except ValueError:
+                full_path = self.temp_path / local_filename
             self._write_file(full_path, file_stream)
             # note that this file has been freshly received
             self.received_files[local_filename] = True
@@ -123,6 +126,10 @@ class TraceServer(qtn.QTcpServer):
         except Exception:
             self.client_socket.write(tcp.SERVER_FTP_ACK, pickle.dumps((False, local_filename)))
             self.send_nonfatal_error(f"receiving file {local_filename}")
+
+    def ftp_to_path(self, local_filename):
+        component, file_name, suffix = str(local_filename).split('|')
+        return (self.temp_path / component / file_name).with_suffix(suffix)
 
     @staticmethod
     def _write_file(full_path, file_stream):

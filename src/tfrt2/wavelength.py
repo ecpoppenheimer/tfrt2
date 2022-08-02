@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 
 import tfrt2.component_widgets as cw
-import cumdistf
+import cumdistf.src.cumdistf.cdf as cdf
 
 
 def _factor(wl):
@@ -91,7 +91,7 @@ PURPLE = 400
 RAINBOW_6 = [RED, ORANGE, YELLOW, GREEN, BLUE, PURPLE]
 
 
-class Spectrum(cumdistf.CumulativeDistributionFunction1D):
+class Spectrum(cdf.CumulativeDistributionFunction1D):
     def __init__(self, data, limits=(VISIBLE_MIN, VISIBLE_MAX), interp_res=100):
         """
         A class to sample wavelengths out of a spectrum.  Wavelengths are in nm, by default.

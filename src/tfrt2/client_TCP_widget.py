@@ -23,7 +23,9 @@ class ClientTCPWidget(qtw.QWidget):
     DISCONNECTED_REMOTE = 4
     VALIDATION_FAIL = 5
 
-    client_settings_purges = {"system_path", "active_pane", "server_port", "server_ip", "auto_update_on_redraw"}
+    client_settings_purges = {
+        "system_path", "active_pane", "server_port", "server_ip", "auto_update_on_redraw", "auto_retrace"
+    }
     component_settings_purges = {
         "visible", "color", "show_edges", "vum_origin_visible", "acum_origin_visible", "norm_arrow_visibility",
         "norm_arrow_length", "parameter_arrow_visibility", "parameter_arrow_length", "opacity", "show_spectrum",
@@ -328,16 +330,22 @@ class ClientTCPWidget(qtw.QWidget):
         if status:
             label.deleteLater()
             self.sync_tasks.pop(context)
+
+            if context == "system_load":
+                self.sync_status.setText("Status: Success")
+            else:
+                # If we have exactly one task left, 'system_load', then it is time to sent the system load request.
+                # Don't do this if we received an error, because this could cause an infinite loop.
+                if len(self.sync_tasks) == 1:
+                    if tuple(self.sync_tasks.keys())[0] == "system_load":
+                        self.server_socket.write(tcp.CLIENT_LOAD_SYSTEM)
+                    else:
+                        print("SyncError: ended up with just one sync_task, but it isn't system_load.")
         else:
             self.sync_status.setText("Status: Failure")
             label.setStyleSheet("background-color: pink;")
 
-        if len(self.sync_tasks) == 1:
-            if tuple(self.sync_tasks.keys())[0] == "system_load":
-                # If we have exactly one task left, 'system_load', then send that request now
-                self.server_socket.write(tcp.CLIENT_LOAD_SYSTEM)
-            else:
-                print("SyncError: ended up with just one sync_task, but it isn't system_load.")
+
 
     def server_ack_driver_settings(self, data):
         self._server_ack(pickle.loads(data), "driver_settings")
@@ -353,7 +361,6 @@ class ClientTCPWidget(qtw.QWidget):
 
     def server_system_load_ack(self, data):
         self._server_ack(pickle.loads(data), "system_load")
-        self.sync_status.setText("Status: Success")
         self.trace_button.setEnabled(True)
         self.abort_button.setEnabled(False)
 
@@ -369,8 +376,12 @@ class ClientTCPWidget(qtw.QWidget):
                     # that can be used to keep track of the transferred file on both ends.  This file should be FTP'd
                     # over to the server, and the new unique filename should be fed to the settings that will be
                     # sent over.
-                    remote_filename = Path(name) / key.replace("_path", "")
-                    remote_filename = str(Path(remote_filename).with_suffix(Path(value).suffix))
+                    if '|' in name or '|' in key or '$' in name or '$' in key:
+                        raise ValueError(
+                            "ClientTCPWidget: '|' and '$' are invalid characters to include in names / paths"
+                        )
+                    remote_filename = name + '|' + key.replace("_path", "") + '|' + str(Path(value).suffix)
+                    print(f"sending an FTP with filename {remote_filename}")
                     self.ftp(remote_filename, value)
                     component_settings[key] = "$PATH$" + remote_filename
                 elif key not in self.component_settings_purges and "path" not in key:

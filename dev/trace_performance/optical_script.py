@@ -90,3 +90,5 @@ class LocalSystem(OpticalSystem):
         )
 
         self.feed_parts(target=target, source=source)
+
+        print("Built optical script!")
