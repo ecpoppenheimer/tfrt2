@@ -430,8 +430,8 @@ class ParametricTriangleOptic(TriangleOptic):
         else:
             self.initials = initials
         self.parameters = tf.Variable(self.initials)
-        self.faces = tf.constant(self.try_flip_norm(mt.unpack_faces(mesh.faces)), dtype=tf.int32)
-        self.vectors = tf.constant(self.vector_generator(self.zero_points), dtype=tf.float64)
+        self.faces = tf.convert_to_tensor(self.try_flip_norm(mt.unpack_faces(mesh.faces)), dtype=tf.int32)
+        self.vectors = tf.convert_to_tensor(self.vector_generator(self.zero_points), dtype=tf.float64)
 
         # Need to temporarily disable the vum so we can update so we can get the parts we need to make the new VUM.
         enable_vum = self.enable_vum
@@ -443,12 +443,13 @@ class ParametricTriangleOptic(TriangleOptic):
     def try_mesh_tools(self):
         vertices = self.get_vertices_from_params(tf.zeros_like(self.parameters))
         if self.enable_vum:
-            self.vum = mt.cosine_vum(
-                tf.constant(self.settings.vum_origin, dtype=tf.float64),
-                self.face_vertices,
-                self.vertices,
-                self.faces
-            )
+            print(f"************* eager? {tf.executing_eagerly()}")
+            self.vum = tf.constant(mt.cosine_vum(
+                self.settings.vum_origin,
+                tuple(each.numpy() for each in self.face_vertices),
+                self.vertices.numpy(),
+                self.faces.numpy()
+            ), dtype=tf.bool)
         if self.enable_accumulator:
             active_vertices = tf.gather(vertices, self.driver_indices, axis=0)
 

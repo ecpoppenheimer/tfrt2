@@ -60,20 +60,20 @@ def cosine_vum(origin, points, vertices, faces):
     A vertex update map can help speed up training by reducing the number of vertices a face can control to prevent
     adjacent faces from fighting each other.
 
-    It generates an boolearn array of the same shape as faces, which is true wherever each face is permitted to pass
+    It generates a boolean array of the same shape as faces, which is true wherever each face is permitted to pass
     a gradient into each vertex.
 
     Parameters
     ----------
-    origin : float tensor of shape (3,)
+    origin : float array of shape (3,)
         A single point around which to center the update map.  Often it makes sense to put this at the center of mass
         of the vertices, but different optics could benefit from different locations.
-    points : 3-tuple of float tensor of shape (n, 3)
+    points : 3-tuple of float array of shape (n, 3)
         The vertices of the mesh to provide this VUM for.  This is a 3-tuple of vertices that have already been
         expanded out of the faces (i.e. all three vertices for each face)
-    vertices : float tensor of shape (m, 3)
+    vertices : float array of shape (m, 3)
         The vertices of the mesh, but not expanded.
-    faces : int tensor of shape (n, 3)
+    faces : int array of shape (n, 3)
         The faces of the mesh.
 
     Returns
@@ -82,10 +82,10 @@ def cosine_vum(origin, points, vertices, faces):
     """
     # points is a 3-tuple of individual points, which are just vertices indexed by faces.
     face_centers = (points[0] + points[1] + points[2]) / 3.0
-    inner_product = tf.stack([projection(each - face_centers, face_centers - origin) for each in points], axis=1)
+    inner_product = np.stack([np_projection(each - face_centers, face_centers - origin) for each in points], axis=1)
     # could possibly be nans, if any face is on the origin, it will fail to normalize.  In any case this is found, set
     # the element to 1 to allow it to move.
-    inner_product = tf.where(tf.math.is_nan(inner_product), 1.0, inner_product).numpy()
+    inner_product = np.where(np.isnan(inner_product), 1.0, inner_product)
 
     # select movable via selecting two largest ip
     minimum = np.argmin(inner_product, axis=-1, keepdims=True)
@@ -113,7 +113,7 @@ def cosine_vum(origin, points, vertices, faces):
         highlight = np.logical_and(faces == v, not_movable)
         movable = np.logical_or(movable, highlight)
 
-    return tf.constant(movable, dtype=tf.bool)
+    return movable
 
 
 def cosine_acum(origin, vertices):
