@@ -3,44 +3,65 @@ from collections import namedtuple
 import tensorflow as tf
 import numpy as np
 
+OPTICAL = 0
+STOP = 1
+TARGET = 2
+
 
 class TraceEngine3D:
-    OPTICAL = 0
-    STOP = 1
-    TARGET = 2
+    all_raysets = {
+        "active_rays", "finished_rays", "dead_rays", "stopped_rays", "all_rays", "unfinished_rays", "source_rays"
+    }
 
     def __init__(self, materials):
         self.materials = materials
-        self.active_rays = tf.zeros((0, 7), dtype=tf.float64)
-        self.finished_rays = tf.zeros((0, 7), dtype=tf.float64)
-        self.dead_rays = tf.zeros((0, 7), dtype=tf.float64)
-        self.stopped_rays = tf.zeros((0, 7), dtype=tf.float64)
-        self.all_rays = tf.zeros((0, 7), dtype=tf.float64)
-        self.unfinished_rays = tf.zeros((0, 7), dtype=tf.float64)
-        self.source_rays = tf.zeros((0, 7), dtype=tf.float64)
+        self.rayset_size = 7 + len(self.materials)
+        self.active_rays = tf.zeros((0, self.rayset_size), dtype=tf.float64)
+        self.finished_rays = tf.zeros((0, self.rayset_size), dtype=tf.float64)
+        self.dead_rays = tf.zeros((0, self.rayset_size), dtype=tf.float64)
+        self.stopped_rays = tf.zeros((0, self.rayset_size), dtype=tf.float64)
+        self.all_rays = tf.zeros((0, self.rayset_size), dtype=tf.float64)
+        self.unfinished_rays = tf.zeros((0, self.rayset_size), dtype=tf.float64)
+        self.source_rays = tf.zeros((0, self.rayset_size), dtype=tf.float64)
         self.opticals = None
         self.stops = None
         self.targets = None
-        self._new_ray_length = tf.constant(1.0, dtype=tf.float64)
 
-        self.intersect_epsilon = 1e-10
-        self.size_epsilon = 1e-10
-        self.ray_start_epsilon = 1e-10
+        self._new_ray_length = tf.constant(1.0, dtype=tf.float64)
+        self._intersect_epsilon = tf.constant(1e-10, dtype=tf.float64)
+        self._size_epsilon = tf.constant(1e-10, dtype=tf.float64)
+        self._ray_start_epsilon = tf.constant(1e-10, dtype=tf.float64)
 
     def clear_rays(self, clear_sources=True):
-        self.active_rays = tf.zeros((0, 7), dtype=tf.float64)
-        self.finished_rays = tf.zeros((0, 7), dtype=tf.float64)
-        self.dead_rays = tf.zeros((0, 7), dtype=tf.float64)
-        self.stopped_rays = tf.zeros((0, 7), dtype=tf.float64)
-        self.all_rays = tf.zeros((0, 7), dtype=tf.float64)
-        self.unfinished_rays = tf.zeros((0, 7), dtype=tf.float64)
+        self.active_rays = tf.zeros((0, self.rayset_size), dtype=tf.float64)
+        self.finished_rays = tf.zeros((0, self.rayset_size), dtype=tf.float64)
+        self.dead_rays = tf.zeros((0, self.rayset_size), dtype=tf.float64)
+        self.stopped_rays = tf.zeros((0, self.rayset_size), dtype=tf.float64)
+        self.all_rays = tf.zeros((0, self.rayset_size), dtype=tf.float64)
+        self.unfinished_rays = tf.zeros((0, self.rayset_size), dtype=tf.float64)
         if clear_sources:
-            self.source_rays = tf.zeros((0, 7), dtype=tf.float64)
+            self.source_rays = tf.zeros((0, self.rayset_size), dtype=tf.float64)
 
-    def _fuse(self):
+    def feed_raysets(self, all_sets):
+        for key in self.all_raysets:
+            try:
+                setattr(self, key, all_sets[key])
+            except KeyError:
+                pass
+
+    def get_raysets(self, numpy=False):
+        if numpy:
+            return {key: getattr(self, key) for key in self.all_raysets}
+        else:
+            return {key: getattr(self, key).numpy() for key in self.all_raysets}
+
+    def fuse_boundaries(self):
         """
-        The first part of ray tracing, this function collects data from the parts and fuses it together into the
-        correct format for the tracer.
+        The first part of ray tracing, this function collects data from the boundary parts and fuses them together into
+        a single chunk in the correct format for the tracer.
+
+        Rays also need to be fused, but this is taken care of in optical_system.refresh_source_rays, which is itself
+        called by optical_system.update.  This function only does the boundaries
 
         All boundaries will get converted into three chunks:
             boundary_points : tf.float64 tensor of shape (n, 9), where n is the number of faces, and the second
@@ -51,13 +72,9 @@ class TraceEngine3D:
                 contains the norm vector of each face.
             metadata : tf.int32 tensor of shape (n, 3), where n is the number of faces and the three elements in
                 the second dimension are material_in, material_out (indices to the system materials list) and
-                the last element identifies which kind of boundary this is: optical = 0, target = 1, stop = 2
+                the last element identifies which kind of boundary this is: optical = 0, target = 1, stop = 2.
 
-        All sources will simply get concatenated together.  They form a chunk of data that is a tf.float64 tensor of
-            shape (m, 7), where m is the number of rays and the second dimension contains the three coordinates of the
-            ray start, the three coordinates of the ray end, and the wavelength.
-
-        These four elements are returned in order
+        These three elements are returned in order.
         """
 
         boundaries = self.opticals + self.stops + self.targets
@@ -68,7 +85,7 @@ class TraceEngine3D:
 
             metadata = []
             for tp, box in zip(
-                (TraceEngine3D.OPTICAL, TraceEngine3D.STOP, TraceEngine3D.TARGET),
+                (OPTICAL, STOP, TARGET),
                 (self.opticals, self.stops, self.targets)
             ):
                 if box:
@@ -76,11 +93,20 @@ class TraceEngine3D:
                         metadata.append(np.broadcast_to(((b.mat_in, b.mat_out, tp),), b.norm.shape))
             metadata = tf.cast(tf.concat(metadata, axis=0), tf.int32)
         else:
-            boundary_points = tf.zeros((0, 3), dtype=tf.float64)
+            boundary_points = tf.zeros((0, 9), dtype=tf.float64)
             boundary_norms = tf.zeros((0, 3), dtype=tf.float64)
             metadata = tf.zeros((0, 3), dtype=tf.int32)
 
-        return self.source_rays, boundary_points, boundary_norms, metadata
+        return boundary_points, boundary_norms, metadata
+
+    def evaluate_n(self, source_rays):
+        """
+        Replace the wavelength on the source rays by refractive index for each material in the system.
+        """
+        ray_data = source_rays[:, :6]
+        wavelength = source_rays[:, 6]
+        n_by_mat = tf.stack(tuple(mat(wavelength) for mat in self.materials), axis=1)
+        return tf.concat((ray_data, tf.reshape(wavelength, (-1, 1)), n_by_mat), axis=1)
 
     def ray_trace(self, trace_depth):
         """
@@ -101,123 +127,27 @@ class TraceEngine3D:
         """
         self.clear_rays(clear_sources=False)
 
+        rays = self.evaluate_n(self.source_rays)
+        boundary_data = self.fuse_boundaries()
+
+        if rays.shape[0] == 0 or boundary_data[0].shape[0] == 0:
+            # The system is empty.  Rays have already been cleared, so do nothing
+            return
+
         self.active_rays, self.finished_rays, self.stopped_rays, self.dead_rays, self.unfinished_rays = \
-            self._full_trace_loop(*self._fuse(), tf.convert_to_tensor(trace_depth, dtype=tf.int32))
+            full_trace_loop(
+                rays,
+                *boundary_data,
+                tf.convert_to_tensor(trace_depth, dtype=tf.int32),
+                self._intersect_epsilon,
+                self._size_epsilon,
+                self._ray_start_epsilon,
+                self._new_ray_length,
+                self.rayset_size
+            )
         self.all_rays = tf.concat((
             self.active_rays, self.finished_rays, self.stopped_rays, self.dead_rays, self.unfinished_rays
         ), axis=0)
-
-    @tf.function
-    def _full_trace_loop(self, source_rays, boundary_points, boundary_norms, metadata, trace_depth):
-        active_rays = tf.ensure_shape(tf.zeros((0, 7), dtype=tf.float64), (None, 7))
-        finished_rays = tf.ensure_shape(tf.zeros((0, 7), dtype=tf.float64), (None, 7))
-        dead_rays = tf.ensure_shape(tf.zeros((0, 7), dtype=tf.float64), (None, 7))
-        stopped_rays = tf.ensure_shape(tf.zeros((0, 7), dtype=tf.float64), (None, 7))
-
-        counter = tf.constant(0, dtype=tf.int32)
-        (
-            active_rays, finished_rays, dead_rays, stopped_rays, working_rays, boundary_points, boundary_norms,
-            metadata, counter, trace_depth
-        ) = tf.while_loop(
-            self._full_while_cond,
-            self._full_while_body,
-            (
-                active_rays, finished_rays, dead_rays, stopped_rays, source_rays, boundary_points, boundary_norms,
-                metadata, counter, trace_depth
-            ),
-            shape_invariants=(
-                tf.TensorShape((None, 7)),
-                tf.TensorShape((None, 7)),
-                tf.TensorShape((None, 7)),
-                tf.TensorShape((None, 7)),
-                tf.TensorShape((None, 7)),
-                tf.TensorShape((None, 9)),
-                tf.TensorShape((None, 3)),
-                tf.TensorShape((None, 3)),
-                tf.TensorShape(()),
-                tf.TensorShape(())
-            )
-        )
-
-        return active_rays, finished_rays, stopped_rays, dead_rays, working_rays
-
-    def _full_while_cond(
-        self, active_rays, finished_rays, dead_rays, stopped_rays, working_rays, boundary_points, boundary_norms,
-        metadata, counter, trace_depth
-    ):
-        return tf.logical_and(tf.less(counter, trace_depth), tf.greater(tf.shape(working_rays)[0], 0))
-
-    def _full_while_body(
-        self, active_rays, finished_rays, dead_rays, stopped_rays, working_rays, boundary_points_const,
-        boundary_norms_const, metadata_const, counter, trace_depth
-    ):
-        counter += 1
-        # Outputs generated here are rectangular, because we are computing intersections between every ray
-        # with every boundary.  First dimension indexes rays, second dimension indexes boundaries.
-        ray_r, trig_u, trig_v, valid = full_line_triangle_intersection(
-            working_rays, boundary_points_const, self.intersect_epsilon
-        )
-        valid, closest_trig, ray_r = self._select_intersections(
-            ray_r, trig_u, trig_v, valid, self.size_epsilon, self.ray_start_epsilon
-        )
-
-        # At this point, active, finished, dead, and stopped rays contain no rays from this iteration;
-        # working rays contains every ray traced this iteration, and valid, closest_trig, and the parametric solution
-        # all match working rays;
-        # and boundary_points, boundary_norms, and metadata are all organized per triangle.
-
-        # Any ray that does not have a valid intersection is a dead ray, so filter them out
-        dr = tf.boolean_mask(working_rays, tf.logical_not(valid))
-        dead_rays = tf.concat((dead_rays, dr), axis=0)
-
-        # Filter out dead rays and project all remaining rays into their intersection.
-        working_rays = tf.boolean_mask(working_rays, valid)
-        closest_trig = tf.boolean_mask(closest_trig, valid)
-        ray_r = tf.reshape(tf.boolean_mask(ray_r, valid), (-1, 1))
-
-        ray_starts = working_rays[:, :3]
-        ray_ends = working_rays[:, 3:6]
-        wavelengths = working_rays[:, 6]
-        working_rays = tf.concat((
-            ray_starts,
-            ray_starts + ray_r * (ray_ends - ray_starts),
-            tf.reshape(wavelengths, (-1, 1))
-        ), axis=1)
-
-        # Select the interaction type by gathering out of metadata.
-        intersection_type = tf.gather(metadata_const[:, 2], closest_trig, axis=0)
-
-        # Sort the rays into their bucket
-        select_stopped = tf.equal(intersection_type, self.STOP)
-        stopped_rays = tf.concat((stopped_rays, tf.boolean_mask(working_rays, select_stopped)), axis=0)
-        select_finished = tf.equal(intersection_type, self.TARGET)
-        finished_rays = tf.concat((finished_rays, tf.boolean_mask(working_rays, select_finished)), axis=0)
-        select_active = tf.equal(intersection_type, self.OPTICAL)
-        working_rays = tf.boolean_mask(working_rays, select_active)
-        active_rays = tf.concat((active_rays, working_rays), axis=0)
-
-        # Filter all ray data down to just the active rays, and gather the triangle data to match.
-        closest_trig = tf.boolean_mask(closest_trig, select_active)
-        selected_boundary_norms = tf.gather(boundary_norms_const, closest_trig, axis=0)
-        ref_index = tf.gather(metadata_const[:, :2], closest_trig, axis=0)
-
-        # Determine the refractive index for each ray reaction
-        ray_starts = working_rays[:, :3]
-        ray_ends = working_rays[:, 3:6]
-        wavelengths = working_rays[:, 6]
-        all_ns_by_wavelength = tf.stack([material(wavelengths) for material in self.materials], axis=1)
-        n_in = tf.gather(all_ns_by_wavelength, ref_index[:, 0], axis=1, batch_dims=1)
-        n_out = tf.gather(all_ns_by_wavelength, ref_index[:, 1], axis=1, batch_dims=1)
-
-        # Perform the ray reactions.
-        working_rays = snells_law_3d(
-            ray_starts, ray_ends, wavelengths, selected_boundary_norms, n_in, n_out, self._new_ray_length
-        )
-
-        return (
-            active_rays, finished_rays, dead_rays, stopped_rays, working_rays, boundary_points_const,
-            boundary_norms_const, metadata_const, counter, trace_depth
-        )
 
     def fast_trace(self, trace_depth):
         """
@@ -236,96 +166,22 @@ class TraceEngine3D:
             The maximum number of tracing iterations to perform.  Rays that have not finished by this many cycles will
             get added to unfinished_rays
         """
+        rays = self.evaluate_n(self.source_rays)
+        boundary_data = self.fuse_boundaries()
 
-        self.finished_rays = self._fast_trace_loop(*self._fuse(), tf.convert_to_tensor(trace_depth, dtype=tf.int32))
+        if rays.shape[0] == 0 or boundary_data[0].shape[0] == 0:
+            # The system is empty.  Rays have already been cleared, so do nothing
+            return
 
-    @tf.function
-    def _fast_trace_loop(self, source_rays, boundary_points, boundary_norms, metadata, trace_depth):
-
-        finished_rays = tf.zeros((0, 7), dtype=tf.float64)
-        counter = tf.constant(0, dtype=tf.int32)
-        (
-            finished_rays, working_rays, boundary_points, boundary_norms, metadata, counter, trace_depth
-        ) = tf.while_loop(
-            self._fast_while_cond,
-            self._fast_while_body,
-            (
-                finished_rays, source_rays, boundary_points, boundary_norms, metadata, counter, trace_depth
-            ),
-            shape_invariants=(
-                tf.TensorShape((None, 7)),
-                tf.TensorShape((None, 7)),
-                tf.TensorShape((None, 9)),
-                tf.TensorShape((None, 3)),
-                tf.TensorShape((None, 3)),
-                tf.TensorShape(()),
-                tf.TensorShape(())
-            )
-        )
-
-        return finished_rays
-
-    def _fast_while_cond(
-            self, finished_rays, working_rays, boundary_points, boundary_norms, metadata, counter, trace_depth
-    ):
-        return tf.logical_and(tf.less(counter, trace_depth), tf.greater(tf.shape(working_rays)[0], 0))
-
-    def _fast_while_body(
-            self, finished_rays, working_rays, boundary_points_const, boundary_norms_const, metadata_const,
-            counter, trace_depth
-    ):
-        counter += 1
-        # Outputs generated here are rectangular, because we are computing intersections between every ray
-        # with every boundary.  First dimension indexes rays, second dimension indexes boundaries.
-        ray_r, trig_u, trig_v, valid = full_line_triangle_intersection(
-            working_rays, boundary_points_const, self.intersect_epsilon
-        )
-        valid, closest_trig, ray_r = self._select_intersections(
-            ray_r, trig_u, trig_v, valid, self.size_epsilon, self.ray_start_epsilon
-        )
-
-        # Select and compile the finished rays
-        intersection_type = tf.gather(metadata_const[:, 2], closest_trig, axis=0)
-        select_finished = tf.logical_and(valid, tf.equal(intersection_type, self.TARGET))
-        fin_r = tf.boolean_mask(working_rays, select_finished)
-        fin_r_r = tf.reshape(tf.boolean_mask(ray_r, select_finished), (-1, 1))
-        finished_starts = fin_r[:, :3]
-        finished_ends = fin_r[:, 3:6]
-        finished_wv = fin_r[:, 6]
-        new_finished_rays = tf.concat((
-            finished_starts,
-            finished_starts + fin_r_r * (finished_ends - finished_starts),
-            tf.reshape(finished_wv, (-1, 1))
-        ), axis=1)
-        finished_rays = tf.concat((finished_rays, new_finished_rays), axis=0)
-
-        # Select the working rays
-        select_working = tf.logical_and(valid, tf.equal(intersection_type, self.OPTICAL))
-        working_rays = tf.boolean_mask(working_rays, select_working)
-        ray_r = tf.reshape(tf.boolean_mask(ray_r, select_working), (-1, 1))
-
-        # Gather the triangle data to match the working rays.
-        closest_trig = tf.boolean_mask(closest_trig, select_working)
-        selected_boundary_norms = tf.gather(boundary_norms_const, closest_trig, axis=0)
-        ref_index = tf.gather(metadata_const[:, :2], closest_trig, axis=0)
-
-        ray_starts = working_rays[:, :3]
-        ray_ends = ray_starts + ray_r * (working_rays[:, 3:6] - ray_starts)
-        wavelengths = working_rays[:, 6]
-
-        # Determine the refractive index for each ray reaction
-        all_ns_by_wavelength = tf.stack([material(wavelengths) for material in self.materials], axis=1)
-        n_in = tf.gather(all_ns_by_wavelength, ref_index[:, 0], axis=1, batch_dims=1)
-        n_out = tf.gather(all_ns_by_wavelength, ref_index[:, 1], axis=1, batch_dims=1)
-
-        # Perform the ray reactions.
-        working_rays = snells_law_3d(
-            ray_starts, ray_ends, wavelengths, selected_boundary_norms, n_in, n_out, self._new_ray_length
-        )
-
-        return (
-            finished_rays, working_rays, boundary_points_const, boundary_norms_const, metadata_const, counter,
-            trace_depth
+        self.finished_rays = fast_trace_loop(
+            rays,
+            *boundary_data,
+            tf.convert_to_tensor(trace_depth, dtype=tf.int32),
+            self._intersect_epsilon,
+            self._size_epsilon,
+            self._ray_start_epsilon,
+            self._new_ray_length,
+            self.rayset_size
         )
 
     def get_trace_samples(self, trace_depth):
@@ -360,99 +216,21 @@ class TraceEngine3D:
             The maximum number of tracing iterations to perform.  Rays that have not finished by this many cycles will
             get added to unfinished_rays
         """
+        # TODO logic for an empty system.  Also, I think I am going to tweak parameter handling - maybe do not want
+        # to save them?
         self.update()
         params = (c.parameters.numpy() for c in self.parametric_optics)
-        trig_map, trig_map_indices = self._sample_loop(
-            *self._fuse(), tf.convert_to_tensor(trace_depth, dtype=tf.int32)
+        trig_map, trig_map_indices = trace_sample_loop(
+            self.evaluate_n(self.source_rays),
+            *self.fuse_boundaries(),
+            tf.convert_to_tensor(trace_depth, dtype=tf.int32),
+            self._intersect_epsilon,
+            self._size_epsilon,
+            self._ray_start_epsilon,
+            self._new_ray_length,
+            self.rayset_size
         )
         return params, self.source_rays.numpy(), (trig_map.numpy(), trig_map_indices.numpy())
-
-    @tf.function
-    def _sample_loop(self, source_rays, boundary_points, boundary_norms, metadata, trace_depth):
-        matched_triangles = tf.zeros((0,), dtype=tf.int32)
-        mt_counts = tf.zeros((0,), dtype=tf.int32)
-        counter = tf.constant(0, dtype=tf.int32)
-        (
-            matched_triangles, mt_counts, working_rays, boundary_points, boundary_norms, metadata, counter, trace_depth
-        ) = tf.while_loop(
-            self._sample_while_cond,
-            self._sample_while_body,
-            (
-                matched_triangles, mt_counts, source_rays, boundary_points, boundary_norms, metadata, counter,
-                trace_depth
-            ),
-            shape_invariants=(
-                tf.TensorShape((None,)),
-                tf.TensorShape((None,)),
-                tf.TensorShape((None, 7)),
-                tf.TensorShape((None, 9)),
-                tf.TensorShape((None, 3)),
-                tf.TensorShape((None, 3)),
-                tf.TensorShape(()),
-                tf.TensorShape(())
-            )
-        )
-
-        # These changes will turn counts into a more convenient form to slice out the needed data later:
-        # to get layer n, slice from mt_counts[n] to mt_counts[n+1]
-        mt_counts = tf.pad(mt_counts, ((1, 0),))
-        mt_counts = tf.cumsum(mt_counts)
-        return matched_triangles, mt_counts
-
-    def _sample_while_cond(
-        self, matched_triangles, mt_counts, working_rays, boundary_points, boundary_norms, metadata, counter,
-        trace_depth
-    ):
-        return tf.logical_and(tf.less(counter, trace_depth), tf.greater(tf.shape(working_rays)[0], 0))
-
-    def _sample_while_body(
-        self, matched_triangles, mt_counts, working_rays, boundary_points_const, boundary_norms_const,
-        metadata_const, counter, trace_depth
-    ):
-        # Outputs generated here are rectangular, because we are computing intersections between every ray
-        # with every boundary.  First dimension indexes rays, second dimension indexes boundaries.
-        ray_r, trig_u, trig_v, valid = full_line_triangle_intersection(
-            working_rays, boundary_points_const, self.intersect_epsilon
-        )
-        valid, closest_trig, ray_r = self._select_intersections(
-            ray_r, trig_u, trig_v, valid, self.size_epsilon, self.ray_start_epsilon
-        )
-
-        # Can construct new_triangles now, just by looking at closest_trig and valid
-        ray_triangle_matches = tf.where(valid, closest_trig, -tf.ones_like(valid, dtype=tf.int32))
-        matched_triangles = tf.concat((matched_triangles, ray_triangle_matches), 0)
-        mt_counts = tf.concat((mt_counts, tf.reshape(tf.shape(ray_triangle_matches)[0], (1,))), 0)
-        counter += 1
-
-        # Select working rays
-        intersection_type = tf.gather(metadata_const[:, 2], closest_trig, axis=0)
-        select_working = tf.logical_and(valid, tf.equal(intersection_type, self.OPTICAL))
-        working_rays = tf.boolean_mask(working_rays, select_working)
-        ray_r = tf.reshape(tf.boolean_mask(ray_r, select_working), (-1, 1))
-
-        # Gather the triangle data to match the working rays.
-        closest_trig = tf.boolean_mask(closest_trig, select_working)
-        selected_boundary_norms = tf.gather(boundary_norms_const, closest_trig, axis=0)
-        ref_index = tf.gather(metadata_const[:, :2], closest_trig, axis=0)
-
-        ray_starts = working_rays[:, :3]
-        ray_ends = ray_starts + ray_r * (working_rays[:, 3:6] - ray_starts)
-        wavelengths = working_rays[:, 6]
-
-        # Determine the refractive index for each ray reaction
-        all_ns_by_wavelength = tf.stack([material(wavelengths) for material in self.materials], axis=1)
-        n_in = tf.gather(all_ns_by_wavelength, ref_index[:, 0], axis=1, batch_dims=1)
-        n_out = tf.gather(all_ns_by_wavelength, ref_index[:, 1], axis=1, batch_dims=1)
-
-        # Perform the ray reactions.
-        working_rays = snells_law_3d(
-            ray_starts, ray_ends, wavelengths, selected_boundary_norms, n_in, n_out, self._new_ray_length
-        )
-
-        return (
-            matched_triangles, mt_counts, working_rays, boundary_points_const, boundary_norms_const, metadata_const,
-            counter, trace_depth
-        )
 
     def precompiled_trace(self, trace_depth, sample):
         """
@@ -489,146 +267,20 @@ class TraceEngine3D:
         params, source_rays, triangles = sample
         self.update_params_from(params)
         self.source_rays = source_rays
-        self.finished_rays = self._precompiled_trace_loop(
-            *self._fuse(),
+        self.finished_rays = precompiled_trace_loop(
+            self.evaluate_n(self.source_rays),
+            *self.fuse_boundaries(),
             *triangles,
-            tf.convert_to_tensor(trace_depth, dtype=tf.int32)
-        )
-
-    @tf.function
-    def _precompiled_trace_loop(
-        self, source_rays, boundary_points, boundary_norms, metadata, triangle_map, triangle_map_indices, trace_depth
-    ):
-        finished_rays = tf.zeros((0, 7), dtype=tf.float64)
-        counter = tf.constant(0, dtype=tf.int32)
-
-        (
-            finished_rays, working_rays, boundary_points, boundary_norms, metadata, triangle_map, triangle_map_indices,
-            counter, trace_depth
-        ) = tf.while_loop(
-            self._precompiled_while_cond,
-            self._precompiled_while_body,
-            (
-                finished_rays, source_rays, boundary_points, boundary_norms, metadata, triangle_map,
-                triangle_map_indices, counter, trace_depth
-            ),
-            shape_invariants=(
-                tf.TensorShape((None, 7)),
-                tf.TensorShape((None, 7)),
-                tf.TensorShape((None, 9)),
-                tf.TensorShape((None, 3)),
-                tf.TensorShape((None, 3)),
-                tf.TensorShape((None,)),
-                tf.TensorShape((None,)),
-                tf.TensorShape(()),
-                tf.TensorShape(())
-            )
-        )
-
-        return finished_rays
-
-    def _precompiled_while_cond(
-        self, finished_rays, working_rays, boundary_points, boundary_norms, metadata, triangle_map,
-        triangle_map_indices, counter, trace_depth
-    ):
-        return tf.logical_and(tf.less(counter, trace_depth), tf.greater(tf.shape(working_rays)[0], 0))
-
-    def _precompiled_while_body(
-        self, finished_rays, working_rays, boundary_points_const, boundary_norms_const, metadata_const,
-        triangle_map_const, triangle_map_indices_const, counter, trace_depth
-    ):
-        # Process the triangle map.  It has -1 wherever rays do not intersect, so filter these ones out
-        start_index, stop_index = triangle_map_indices_const[counter], triangle_map_indices_const[counter+1]
-        gather_triangles = triangle_map_const[start_index:stop_index]
-
-        valid = tf.not_equal(gather_triangles, -1)
-        gather_triangles = tf.boolean_mask(gather_triangles, valid)
-        working_rays = tf.boolean_mask(working_rays, valid)
-
-        # Gather the triangle parts from the triangle map
-        boundary_points = tf.gather(boundary_points_const, gather_triangles)
-        boundary_norms = tf.gather(boundary_norms_const, gather_triangles)
-        metadata = tf.gather(metadata_const, gather_triangles)
-
-        # Perform the intersection, as a raw intersection since we already know which triangle to intersect each
-        # ray with.
-        ray_r, trig_u, trig_v, valid = raw_line_triangle_intersection(
-            working_rays, boundary_points, self.intersect_epsilon
-        )
-
-        # We already know every ray found a triangle, so project them all
-        ray_starts = working_rays[:, :3]
-        ray_ends = working_rays[:, 3:6]
-        wavelengths = working_rays[:, 6]
-        working_rays = tf.concat((
-            ray_starts,
-            ray_starts + tf.reshape(ray_r, (-1, 1)) * (ray_ends - ray_starts),
-            tf.reshape(wavelengths, (-1, 1))
-        ), axis=1)
-
-        # Select and compile the finished rays
-        intersection_type = metadata[:, 2]
-        select_finished = tf.equal(intersection_type, self.TARGET)
-        finished_rays = tf.concat((finished_rays, tf.boolean_mask(working_rays, select_finished)), axis=0)
-
-        # Select the active rays
-        select_working = tf.equal(intersection_type, self.OPTICAL)
-        working_rays = tf.boolean_mask(working_rays, select_working)
-        metadata = tf.boolean_mask(metadata, select_working)
-        boundary_norms = tf.boolean_mask(boundary_norms, select_working)
-        ray_starts = working_rays[:, :3]
-        ray_ends = working_rays[:, 3:6]
-        wavelengths = working_rays[:, 6]
-
-        # Determine the refractive index for each ray reaction
-        all_ns_by_wavelength = tf.stack([material(wavelengths) for material in self.materials], axis=1)
-        n_in = tf.gather(all_ns_by_wavelength, metadata[:, 1], axis=1, batch_dims=1)
-        n_out = tf.gather(all_ns_by_wavelength, metadata[:, 2], axis=1, batch_dims=1)
-
-        # Perform the ray reactions.
-        working_rays = snells_law_3d(
-            ray_starts, ray_ends, wavelengths, boundary_norms, n_in, n_out,
-            self._new_ray_length
-        )
-
-        counter += 1
-        return (
-            finished_rays, working_rays, boundary_points_const, boundary_norms_const, metadata_const,
-            triangle_map_const, triangle_map_indices_const, counter, trace_depth
+            tf.convert_to_tensor(trace_depth, dtype=tf.int32),
+            self._intersect_epsilon,
+            self._new_ray_length,
+            self.rayset_size
         )
 
     def update_params_from(self, param_tuple):
         for component, value in zip(self.parametric_optics, param_tuple):
             component.param_assign(value)
             component.update()
-
-    @staticmethod
-    @tf.function(input_signature=(
-        tf.TensorSpec(shape=(None, None), dtype=tf.float64),
-        tf.TensorSpec(shape=(None, None), dtype=tf.float64),
-        tf.TensorSpec(shape=(None, None), dtype=tf.float64),
-        tf.TensorSpec(shape=(None, None), dtype=tf.bool),
-        tf.TensorSpec(shape=(), dtype=tf.float64),
-        tf.TensorSpec(shape=(), dtype=tf.float64)
-    ))
-    def _select_intersections(ray_r, trig_u, trig_v, valid, size_epsilon, ray_start_epsilon):
-        # prune invalid segment intersections
-        valid = tf.logical_and(valid, tf.greater_equal(trig_u, -size_epsilon))
-        valid = tf.logical_and(valid, tf.greater_equal(trig_v, -size_epsilon))
-        valid = tf.logical_and(valid, tf.less_equal(trig_u + trig_v, 1 + size_epsilon))
-
-        # prune invalid ray intersections
-        valid = tf.logical_and(valid, tf.greater_equal(ray_r, ray_start_epsilon))
-
-        # fill ray_r with large values wherever the intersection is invalid
-        inf = 2 * tf.reduce_max(ray_r) * tf.ones_like(ray_r)
-        ray_r = tf.where(valid, ray_r, inf)
-
-        # find the closest ray intersection
-        closest_trig = tf.argmin(ray_r, axis=1, output_type=tf.int32)
-        valid = tf.reduce_any(valid, axis=1)
-        ray_r = tf.gather(ray_r, closest_trig, axis=1, batch_dims=1)
-        return valid, closest_trig, ray_r
 
     @property
     def new_ray_length(self):
@@ -638,9 +290,64 @@ class TraceEngine3D:
     def new_ray_length(self, val):
         self._new_ray_length = tf.constant(val, dtype=tf.float64)
 
+    @property
+    def intersect_epsilon(self):
+        return self._intersect_epsilon
+
+    @intersect_epsilon.setter
+    def intersect_epsilon(self, val):
+        self._intersect_epsilon = tf.constant(val, dtype=tf.float64)
+
+    @property
+    def size_epsilon(self):
+        return self._size_epsilon
+
+    @size_epsilon.setter
+    def size_epsilon(self, val):
+        self._size_epsilon = tf.constant(val, dtype=tf.float64)
+
+    @property
+    def ray_start_epsilon(self):
+        return self._ray_start_epsilon
+
+    @ray_start_epsilon.setter
+    def ray_start_epsilon(self, val):
+        self._ray_start_epsilon = tf.constant(val, dtype=tf.float64)
+
+
+# ======================================================================================================================
+
 
 @tf.function(input_signature=(
-        tf.TensorSpec(shape=(None, 7), dtype=tf.float64),
+    tf.TensorSpec(shape=(None, None), dtype=tf.float64),
+    tf.TensorSpec(shape=(None, None), dtype=tf.float64),
+    tf.TensorSpec(shape=(None, None), dtype=tf.float64),
+    tf.TensorSpec(shape=(None, None), dtype=tf.bool),
+    tf.TensorSpec(shape=(), dtype=tf.float64),
+    tf.TensorSpec(shape=(), dtype=tf.float64)
+))
+def _select_intersections(ray_r, trig_u, trig_v, valid, size_epsilon, ray_start_epsilon):
+    # prune invalid segment intersections
+    valid = tf.logical_and(valid, tf.greater_equal(trig_u, -size_epsilon))
+    valid = tf.logical_and(valid, tf.greater_equal(trig_v, -size_epsilon))
+    valid = tf.logical_and(valid, tf.less_equal(trig_u + trig_v, 1 + size_epsilon))
+
+    # prune invalid ray intersections
+    valid = tf.logical_and(valid, tf.greater_equal(ray_r, ray_start_epsilon))
+
+    # fill ray_r with large values wherever the intersection is invalid
+    inf = 2 * tf.reduce_max(ray_r) * tf.ones_like(ray_r)
+    ray_r = tf.where(valid, ray_r, inf)
+
+    # find the closest ray intersection
+    closest_trig = tf.argmin(ray_r, axis=1, output_type=tf.int32)
+    valid = tf.reduce_any(valid, axis=1)
+    ray_r = tf.gather(ray_r, closest_trig, axis=1, batch_dims=1)
+    return valid, closest_trig, ray_r
+
+
+@tf.function(input_signature=(
+        tf.TensorSpec(shape=(None, 6), dtype=tf.float64),
         tf.TensorSpec(shape=(None, 9), dtype=tf.float64),
         tf.TensorSpec(shape=(), dtype=tf.float64)
 ))
@@ -649,7 +356,7 @@ def full_line_triangle_intersection(working_rays, boundary_points, epsilon):
     ray_count = tf.shape(working_rays)[0]
     boundary_count = tf.shape(boundary_points)[0]
     working_rays = tf.expand_dims(working_rays, 1)
-    working_rays = tf.broadcast_to(working_rays, (ray_count, boundary_count, 7))
+    working_rays = tf.broadcast_to(working_rays, (ray_count, boundary_count, 6))
     boundary_points = tf.expand_dims(boundary_points, 0)
     boundary_points = tf.broadcast_to(boundary_points, (ray_count, boundary_count, 9))
 
@@ -657,7 +364,7 @@ def full_line_triangle_intersection(working_rays, boundary_points, epsilon):
 
 
 @tf.function(input_signature=(
-        tf.TensorSpec(shape=(None, 7), dtype=tf.float64),
+        tf.TensorSpec(shape=(None, 6), dtype=tf.float64),
         tf.TensorSpec(shape=(None, 9), dtype=tf.float64),
         tf.TensorSpec(shape=(), dtype=tf.float64)
 ))
@@ -681,7 +388,7 @@ def raw_line_triangle_intersection(rays, boundaries, epsilon):
     boundary_3 = 2
     """
 
-    rx1, ry1, rz1, rx2, ry2, rz2, _ = tf.unstack(rays, axis=-1)
+    rx1, ry1, rz1, rx2, ry2, rz2 = tf.unstack(rays, axis=-1)
     xp, yp, zp, x1, y1, z1, x2, y2, z2 = tf.unstack(boundaries, axis=-1)
 
     a = rx1 - rx2
@@ -717,13 +424,12 @@ def raw_line_triangle_intersection(rays, boundaries, epsilon):
 @tf.function(input_signature=(
     tf.TensorSpec(shape=(None, 3), dtype=tf.float64),
     tf.TensorSpec(shape=(None, 3), dtype=tf.float64),
-    tf.TensorSpec(shape=(None,), dtype=tf.float64),
     tf.TensorSpec(shape=(None, 3), dtype=tf.float64),
     tf.TensorSpec(shape=(None,), dtype=tf.float64),
     tf.TensorSpec(shape=(None,), dtype=tf.float64),
     tf.TensorSpec(shape=(), dtype=tf.float64),
 ))
-def snells_law_3d(ray_starts, ray_ends, wavelengths, boundary_norms, n_in, n_out, new_ray_length):
+def snells_law_3d(ray_starts, ray_ends, boundary_norms, n_in, n_out, new_ray_length):
     # A vector representing the ray direction.
     u = tf.math.l2_normalize(ray_ends - ray_starts, axis=1)
 
@@ -761,4 +467,458 @@ def snells_law_3d(ray_starts, ray_ends, wavelengths, boundary_norms, n_in, n_out
     new_vector = tf.where(do_reflect, reflect, refract)
 
     new_end = ray_ends + new_ray_length * new_vector
-    return tf.concat((ray_ends, new_end, tf.reshape(wavelengths, (-1, 1))), axis=1)
+    return ray_ends, new_end
+
+
+# ======================================================================================================================
+# Full trace, compile full ray sets, used primarily for display.
+
+
+@tf.function
+def full_trace_loop(
+    source_rays, boundary_points, boundary_norms, metadata, trace_depth, intersect_epsilon, size_epsilon,
+    ray_start_epsilon, new_ray_length, rayset_size
+):
+    active_rays = tf.ensure_shape(tf.zeros((0, rayset_size), dtype=tf.float64), (None, rayset_size))
+    finished_rays = tf.ensure_shape(tf.zeros((0, rayset_size), dtype=tf.float64), (None, rayset_size))
+    dead_rays = tf.ensure_shape(tf.zeros((0, rayset_size), dtype=tf.float64), (None, rayset_size))
+    stopped_rays = tf.ensure_shape(tf.zeros((0, rayset_size), dtype=tf.float64), (None, rayset_size))
+
+    counter = tf.constant(0, dtype=tf.int32)
+    (
+        active_rays, finished_rays, dead_rays, stopped_rays, working_rays, boundary_points, boundary_norms,
+        metadata, counter, trace_depth, intersect_epsilon, size_epsilon, ray_start_epsilon, new_ray_length
+    ) = tf.while_loop(
+        _full_while_cond,
+        _full_while_body,
+        (
+            active_rays, finished_rays, dead_rays, stopped_rays, source_rays, boundary_points, boundary_norms,
+            metadata, counter, trace_depth, intersect_epsilon, size_epsilon, ray_start_epsilon, new_ray_length
+        ),
+        shape_invariants=(
+            tf.TensorShape((None, rayset_size)),
+            tf.TensorShape((None, rayset_size)),
+            tf.TensorShape((None, rayset_size)),
+            tf.TensorShape((None, rayset_size)),
+            tf.TensorShape((None, rayset_size)),
+            tf.TensorShape((None, 9)),
+            tf.TensorShape((None, 3)),
+            tf.TensorShape((None, 3)),
+            tf.TensorShape(()),
+            tf.TensorShape(()),
+            tf.TensorShape(()),
+            tf.TensorShape(()),
+            tf.TensorShape(()),
+            tf.TensorShape(())
+        )
+    )
+
+    return active_rays, finished_rays, stopped_rays, dead_rays, working_rays
+
+
+def _full_while_cond(
+    active_rays, finished_rays, dead_rays, stopped_rays, working_rays, boundary_points, boundary_norms,
+    metadata, counter, trace_depth, intersect_epsilon, size_epsilon, ray_start_epsilon, new_ray_length
+):
+    return tf.logical_and(tf.less(counter, trace_depth), tf.greater(tf.shape(working_rays)[0], 0))
+
+
+def _full_while_body(
+    active_rays, finished_rays, dead_rays, stopped_rays, working_rays, boundary_points_const,
+    boundary_norms_const, metadata_const, counter, trace_depth, intersect_epsilon, size_epsilon, ray_start_epsilon,
+    new_ray_length
+):
+    counter += 1
+    # Outputs generated here are rectangular, because we are computing intersections between every ray
+    # with every boundary.  First dimension indexes rays, second dimension indexes boundaries.
+    ray_r, trig_u, trig_v, valid = full_line_triangle_intersection(
+        working_rays[:, :6], boundary_points_const, intersect_epsilon
+    )
+    valid, closest_trig, ray_r = _select_intersections(
+        ray_r, trig_u, trig_v, valid, size_epsilon, ray_start_epsilon
+    )
+
+    # At this point, active, finished, dead, and stopped rays contain no rays from this iteration;
+    # working rays contains every ray traced this iteration, and valid, closest_trig, and the parametric solution
+    # all match working rays;
+    # and boundary_points, boundary_norms, and metadata are all organized per triangle.
+
+    # Any ray that does not have a valid intersection is a dead ray, so filter them out
+    dr = tf.boolean_mask(working_rays, tf.logical_not(valid))
+    dead_rays = tf.concat((dead_rays, dr), axis=0)
+
+    # Filter out dead rays and project all remaining rays into their intersection.
+    working_rays = tf.boolean_mask(working_rays, valid)
+    closest_trig = tf.boolean_mask(closest_trig, valid)
+    ray_r = tf.reshape(tf.boolean_mask(ray_r, valid), (-1, 1))
+
+    ray_starts = working_rays[:, :3]
+    ray_ends = working_rays[:, 3:6]
+    wl_data = working_rays[:, 6:]
+    working_rays = tf.concat((
+        ray_starts,
+        ray_starts + ray_r * (ray_ends - ray_starts),
+        wl_data
+    ), axis=1)
+
+    # Select the interaction type by gathering out of metadata.
+    intersection_type = tf.gather(metadata_const[:, 2], closest_trig, axis=0)
+
+    # Sort the rays into their bucket
+    select_stopped = tf.equal(intersection_type, STOP)
+    stopped_rays = tf.concat((stopped_rays, tf.boolean_mask(working_rays, select_stopped)), axis=0)
+    select_finished = tf.equal(intersection_type, TARGET)
+    finished_rays = tf.concat((finished_rays, tf.boolean_mask(working_rays, select_finished)), axis=0)
+    select_working = tf.equal(intersection_type, OPTICAL)
+    working_rays = tf.boolean_mask(working_rays, select_working)
+    active_rays = tf.concat((active_rays, working_rays), axis=0)
+
+    # Gather the triangle data to match the working rays.
+    closest_trig = tf.boolean_mask(closest_trig, select_working)
+    selected_boundary_norms = tf.gather(boundary_norms_const, closest_trig, axis=0)
+    mat_in = tf.gather(metadata_const[:, 0], closest_trig, axis=0)
+    mat_out = tf.gather(metadata_const[:, 1], closest_trig, axis=0)
+
+    # Split out the ray data.
+    ray_starts = working_rays[:, :3]
+    ray_ends = working_rays[:, 3:6]
+    wavelength = tf.reshape(working_rays[:, 6], (-1, 1))
+
+    # Determine the refractive index for each ray reaction
+    n_by_mat = working_rays[:, 7:]
+    n_in = tf.gather(n_by_mat, mat_in, axis=1, batch_dims=1)
+    n_out = tf.gather(n_by_mat, mat_out, axis=1, batch_dims=1)
+
+    # Perform the ray reactions.
+    new_starts, new_ends = snells_law_3d(
+        ray_starts, ray_ends, selected_boundary_norms, n_in, n_out, new_ray_length
+    )
+    working_rays = tf.concat((new_starts, new_ends, wavelength, n_by_mat), axis=1)
+
+    return (
+        active_rays, finished_rays, dead_rays, stopped_rays, working_rays, boundary_points_const,
+        boundary_norms_const, metadata_const, counter, trace_depth, intersect_epsilon, size_epsilon,
+        ray_start_epsilon, new_ray_length
+    )
+
+
+# ======================================================================================================================
+# Fast trace, only compiling finished rays, used primarily for analysing output.
+
+
+@tf.function
+def fast_trace_loop(
+    source_rays, boundary_points, boundary_norms, metadata, trace_depth, intersect_epsilon, size_epsilon,
+    ray_start_epsilon, new_ray_length, rayset_size
+):
+    finished_rays = tf.zeros((0, rayset_size), dtype=tf.float64)
+    counter = tf.constant(0, dtype=tf.int32)
+    (
+        finished_rays, working_rays, boundary_points, boundary_norms, metadata, counter, trace_depth,
+        intersect_epsilon, size_epsilon, ray_start_epsilon, new_ray_length
+    ) = tf.while_loop(
+        _fast_while_cond,
+        _fast_while_body,
+        (
+            finished_rays, source_rays, boundary_points, boundary_norms, metadata, counter, trace_depth,
+            intersect_epsilon, size_epsilon, ray_start_epsilon, new_ray_length
+        ),
+        shape_invariants=(
+            tf.TensorShape((None, rayset_size)),
+            tf.TensorShape((None, rayset_size)),
+            tf.TensorShape((None, 9)),
+            tf.TensorShape((None, 3)),
+            tf.TensorShape((None, 3)),
+            tf.TensorShape(()),
+            tf.TensorShape(()),
+            tf.TensorShape(()),
+            tf.TensorShape(()),
+            tf.TensorShape(()),
+            tf.TensorShape(())
+        )
+    )
+
+    return finished_rays
+
+
+def _fast_while_cond(
+    finished_rays, working_rays, boundary_points, boundary_norms, metadata, counter, trace_depth,
+    intersect_epsilon, size_epsilon, ray_start_epsilon, new_ray_length
+):
+    return tf.logical_and(tf.less(counter, trace_depth), tf.greater(tf.shape(working_rays)[0], 0))
+
+
+def _fast_while_body(
+        finished_rays, working_rays, boundary_points_const, boundary_norms_const, metadata_const,
+        counter, trace_depth, intersect_epsilon, size_epsilon, ray_start_epsilon, new_ray_length
+):
+    counter += 1
+    # Outputs generated here are rectangular, because we are computing intersections between every ray
+    # with every boundary.  First dimension indexes rays, second dimension indexes boundaries.
+    ray_r, trig_u, trig_v, valid = full_line_triangle_intersection(
+        working_rays[:, :6], boundary_points_const, intersect_epsilon
+    )
+    valid, closest_trig, ray_r = _select_intersections(
+        ray_r, trig_u, trig_v, valid, size_epsilon, ray_start_epsilon
+    )
+
+    # Select and compile the finished rays
+    intersection_type = tf.gather(metadata_const[:, 2], closest_trig, axis=0)
+    select_finished = tf.logical_and(valid, tf.equal(intersection_type, TARGET))
+    fin_r = tf.boolean_mask(working_rays, select_finished)
+    fin_r_r = tf.reshape(tf.boolean_mask(ray_r, select_finished), (-1, 1))
+    finished_starts = fin_r[:, :3]
+    finished_ends = fin_r[:, 3:6]
+    finished_wv = fin_r[:, 6:]
+    new_finished_rays = tf.concat((
+        finished_starts,
+        finished_starts + fin_r_r * (finished_ends - finished_starts),
+        finished_wv
+    ), axis=1)
+    finished_rays = tf.concat((finished_rays, new_finished_rays), axis=0)
+
+    # Select the working rays
+    select_working = tf.logical_and(valid, tf.equal(intersection_type, OPTICAL))
+    working_rays = tf.boolean_mask(working_rays, select_working)
+    ray_r = tf.reshape(tf.boolean_mask(ray_r, select_working), (-1, 1))
+
+    # Gather the triangle data to match the working rays.
+    closest_trig = tf.boolean_mask(closest_trig, select_working)
+    selected_boundary_norms = tf.gather(boundary_norms_const, closest_trig, axis=0)
+    mat_in = tf.gather(metadata_const[:, 0], closest_trig, axis=0)
+    mat_out = tf.gather(metadata_const[:, 1], closest_trig, axis=0)
+
+    # Split out the ray data
+    ray_starts = working_rays[:, :3]
+    ray_ends = ray_starts + ray_r * (working_rays[:, 3:6] - ray_starts)
+    wavelength = tf.reshape(working_rays[:, 6], (-1, 1))
+
+    # Determine the refractive index for each ray reaction
+    n_by_mat = working_rays[:, 7:]
+    n_in = tf.gather(n_by_mat, mat_in, axis=1, batch_dims=1)
+    n_out = tf.gather(n_by_mat, mat_out, axis=1, batch_dims=1)
+
+    # Perform the ray reactions.
+    new_starts, new_ends = snells_law_3d(
+        ray_starts, ray_ends, selected_boundary_norms, n_in, n_out, new_ray_length
+    )
+    working_rays = tf.concat((new_starts, new_ends, wavelength, n_by_mat), axis=1)
+
+    return (
+        finished_rays, working_rays, boundary_points_const, boundary_norms_const, metadata_const, counter,
+        trace_depth, intersect_epsilon, size_epsilon, ray_start_epsilon, new_ray_length
+    )
+
+
+# ======================================================================================================================
+# Precompiled trace, splitting ray-triangle intersection validation and tracing, primarily used in gradient descent.
+
+
+@tf.function
+def trace_sample_loop(
+    source_rays, boundary_points, boundary_norms, metadata, trace_depth, intersect_epsilon, size_epsilon,
+    ray_start_epsilon, new_ray_length, rayset_size
+):
+    matched_triangles = tf.zeros((0,), dtype=tf.int32)
+    mt_counts = tf.zeros((0,), dtype=tf.int32)
+    counter = tf.constant(0, dtype=tf.int32)
+    (
+        matched_triangles, mt_counts, working_rays, boundary_points, boundary_norms, metadata, counter, trace_depth,
+        intersect_epsilon, size_epsilon, ray_start_epsilon, new_ray_length
+    ) = tf.while_loop(
+        trace_sample_while_cond,
+        trace_sample_while_body,
+        (
+            matched_triangles, mt_counts, source_rays, boundary_points, boundary_norms, metadata, counter,
+            trace_depth, intersect_epsilon, size_epsilon, ray_start_epsilon, new_ray_length
+        ),
+        shape_invariants=(
+            tf.TensorShape((None,)),
+            tf.TensorShape((None,)),
+            tf.TensorShape((None, rayset_size)),
+            tf.TensorShape((None, 9)),
+            tf.TensorShape((None, 3)),
+            tf.TensorShape((None, 3)),
+            tf.TensorShape(()),
+            tf.TensorShape(()),
+            tf.TensorShape(()),
+            tf.TensorShape(()),
+            tf.TensorShape(()),
+            tf.TensorShape(())
+        )
+    )
+
+    # These changes will turn counts into a more convenient form to slice out the needed data later:
+    # to get layer n, slice from mt_counts[n] to mt_counts[n+1]
+    mt_counts = tf.pad(mt_counts, ((1, 0),))
+    mt_counts = tf.cumsum(mt_counts)
+    return matched_triangles, mt_counts
+
+
+def trace_sample_while_cond(
+    matched_triangles, mt_counts, working_rays, boundary_points, boundary_norms, metadata, counter,
+    trace_depth, intersect_epsilon, size_epsilon, ray_start_epsilon, new_ray_length
+):
+    return tf.logical_and(tf.less(counter, trace_depth), tf.greater(tf.shape(working_rays)[0], 0))
+
+
+def trace_sample_while_body(
+    matched_triangles, mt_counts, working_rays, boundary_points_const, boundary_norms_const,
+    metadata_const, counter, trace_depth, intersect_epsilon, size_epsilon, ray_start_epsilon, new_ray_length
+):
+    # Outputs generated here are rectangular, because we are computing intersections between every ray
+    # with every boundary.  First dimension indexes rays, second dimension indexes boundaries.
+    ray_r, trig_u, trig_v, valid = full_line_triangle_intersection(
+        working_rays[:, :6], boundary_points_const, intersect_epsilon
+    )
+    valid, closest_trig, ray_r = _select_intersections(
+        ray_r, trig_u, trig_v, valid, size_epsilon, ray_start_epsilon
+    )
+
+    # Can construct new_triangles now, just by looking at closest_trig and valid
+    ray_triangle_matches = tf.where(valid, closest_trig, -tf.ones_like(valid, dtype=tf.int32))
+    matched_triangles = tf.concat((matched_triangles, ray_triangle_matches), 0)
+    mt_counts = tf.concat((mt_counts, tf.reshape(tf.shape(ray_triangle_matches)[0], (1,))), 0)
+    counter += 1
+
+    # Select working rays
+    intersection_type = tf.gather(metadata_const[:, 2], closest_trig, axis=0)
+    select_working = tf.logical_and(valid, tf.equal(intersection_type, OPTICAL))
+    working_rays = tf.boolean_mask(working_rays, select_working)
+    ray_r = tf.reshape(tf.boolean_mask(ray_r, select_working), (-1, 1))
+
+    # Gather the triangle data to match the working rays.
+    closest_trig = tf.boolean_mask(closest_trig, select_working)
+    selected_boundary_norms = tf.gather(boundary_norms_const, closest_trig, axis=0)
+    mat_in = tf.gather(metadata_const[:, 0], closest_trig, axis=0)
+    mat_out = tf.gather(metadata_const[:, 1], closest_trig, axis=0)
+
+    # Split out the ray data.
+    ray_starts = working_rays[:, :3]
+    ray_ends = ray_starts + ray_r * (working_rays[:, 3:6] - ray_starts)
+    wavelength = tf.reshape(working_rays[:, 6], (-1, 1))
+
+    # Determine the refractive index for each ray reaction
+    n_by_mat = working_rays[:, 7:]
+    n_in = tf.gather(n_by_mat, mat_in, axis=1, batch_dims=1)
+    n_out = tf.gather(n_by_mat, mat_out, axis=1, batch_dims=1)
+
+    # Perform the ray reactions.
+    new_starts, new_ends = snells_law_3d(
+        ray_starts, ray_ends, selected_boundary_norms, n_in, n_out, new_ray_length
+    )
+    working_rays = tf.concat((new_starts, new_ends, wavelength, n_by_mat), axis=1)
+
+    return (
+        matched_triangles, mt_counts, working_rays, boundary_points_const, boundary_norms_const, metadata_const,
+        counter, trace_depth, intersect_epsilon, size_epsilon, ray_start_epsilon, new_ray_length
+    )
+
+
+@tf.function
+def precompiled_trace_loop(
+    source_rays, boundary_points, boundary_norms, metadata, triangle_map, triangle_map_indices, trace_depth,
+    intersect_epsilon, new_ray_length, rayset_size
+):
+    finished_rays = tf.zeros((0, rayset_size), dtype=tf.float64)
+    counter = tf.constant(0, dtype=tf.int32)
+
+    (
+        finished_rays, working_rays, boundary_points, boundary_norms, metadata, triangle_map, triangle_map_indices,
+        counter, trace_depth, intersect_epsilon, new_ray_length
+    ) = tf.while_loop(
+        _precompiled_while_cond,
+        _precompiled_while_body,
+        (
+            finished_rays, source_rays, boundary_points, boundary_norms, metadata, triangle_map,
+            triangle_map_indices, counter, trace_depth, intersect_epsilon, new_ray_length
+        ),
+        shape_invariants=(
+            tf.TensorShape((None, rayset_size)),
+            tf.TensorShape((None, rayset_size)),
+            tf.TensorShape((None, 9)),
+            tf.TensorShape((None, 3)),
+            tf.TensorShape((None, 3)),
+            tf.TensorShape((None,)),
+            tf.TensorShape((None,)),
+            tf.TensorShape(()),
+            tf.TensorShape(()),
+            tf.TensorShape(()),
+            tf.TensorShape(())
+        )
+    )
+
+    return finished_rays
+
+
+def _precompiled_while_cond(
+    finished_rays, working_rays, boundary_points, boundary_norms, metadata, triangle_map,
+    triangle_map_indices, counter, trace_depth, intersect_epsilon, new_ray_length
+):
+    return tf.logical_and(tf.less(counter, trace_depth), tf.greater(tf.shape(working_rays)[0], 0))
+
+
+def _precompiled_while_body(
+    finished_rays, working_rays, boundary_points_const, boundary_norms_const, metadata_const,
+    triangle_map_const, triangle_map_indices_const, counter, trace_depth, intersect_epsilon, new_ray_length
+):
+    # Process the triangle map.  It has -1 wherever rays do not intersect, so filter these ones out
+    start_index, stop_index = triangle_map_indices_const[counter], triangle_map_indices_const[counter+1]
+    gather_triangles = triangle_map_const[start_index:stop_index]
+
+    valid = tf.not_equal(gather_triangles, -1)
+    gather_triangles = tf.boolean_mask(gather_triangles, valid)
+    working_rays = tf.boolean_mask(working_rays, valid)
+
+    # Gather the triangle parts from the triangle map
+    boundary_points = tf.gather(boundary_points_const, gather_triangles)
+    boundary_norms = tf.gather(boundary_norms_const, gather_triangles)
+    metadata = tf.gather(metadata_const, gather_triangles)
+
+    # Perform the intersection, as a raw intersection since we already know which triangle to intersect each
+    # ray with.
+    ray_r, trig_u, trig_v, valid = raw_line_triangle_intersection(
+        working_rays[:, :6], boundary_points, intersect_epsilon
+    )
+
+    # We already know every ray found a triangle, so project them all
+    ray_starts = working_rays[:, :3]
+    ray_ends = working_rays[:, 3:6]
+    wl_data = working_rays[:, 6:]
+    working_rays = tf.concat((
+        ray_starts,
+        ray_starts + tf.reshape(ray_r, (-1, 1)) * (ray_ends - ray_starts),
+        wl_data
+    ), axis=1)
+
+    # Select and compile the finished rays
+    intersection_type = metadata[:, 2]
+    select_finished = tf.equal(intersection_type, TARGET)
+    finished_rays = tf.concat((finished_rays, tf.boolean_mask(working_rays, select_finished)), axis=0)
+
+    # Select the active rays
+    select_working = tf.equal(intersection_type, OPTICAL)
+    working_rays = tf.boolean_mask(working_rays, select_working)
+    metadata = tf.boolean_mask(metadata, select_working)
+    boundary_norms = tf.boolean_mask(boundary_norms, select_working)
+
+    ray_starts = working_rays[:, :3]
+    ray_ends = working_rays[:, 3:6]
+    wavelength = tf.reshape(working_rays[:, 6], (-1, 1))
+
+    # Determine the refractive index for each ray reaction
+    n_by_mat = working_rays[:, 7:]
+    n_in = tf.gather(n_by_mat, metadata[:, 0], axis=1, batch_dims=1)
+    n_out = tf.gather(n_by_mat, metadata[:, 1], axis=1, batch_dims=1)
+
+    # Perform the ray reactions.
+    new_starts, new_ends = snells_law_3d(
+        ray_starts, ray_ends, boundary_norms, n_in, n_out, new_ray_length
+    )
+    working_rays = tf.concat((new_starts, new_ends, wavelength, n_by_mat), axis=1)
+
+    counter += 1
+    return (
+        finished_rays, working_rays, boundary_points_const, boundary_norms_const, metadata_const,
+        triangle_map_const, triangle_map_indices_const, counter, trace_depth, intersect_epsilon, new_ray_length
+    )

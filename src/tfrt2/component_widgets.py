@@ -22,6 +22,7 @@ class SettingsEntryBox(qtw.QWidget):
     ):
         super().__init__()
         layout = qtw.QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
 
         if label is None:
@@ -54,58 +55,69 @@ class SettingsRangeBox(qtw.QWidget):
     def __init__(self, settings, label, low_key, high_key, value_type, validator=None, callback=None):
         super().__init__()
         layout = qtw.QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
         self.settings = settings
+        self.value_type = value_type
+        self.low_key = low_key
+        self.high_key = high_key
+        self.callback = callback
 
-        label = qtw.QLabel(label)
-        label.setSizePolicy(qtw.QSizePolicy.Minimum, qtw.QSizePolicy.Minimum)
-        layout.addWidget(label)
+        if label != "":
+            label = qtw.QLabel(label)
+            label.setSizePolicy(qtw.QSizePolicy.Minimum, qtw.QSizePolicy.Minimum)
+            layout.addWidget(label)
 
-        low_entry = qtw.QLineEdit()
-        layout.addWidget(low_entry)
-        low_entry.setText(str(settings.dict[low_key]))
+        self.low_entry = qtw.QLineEdit()
+        layout.addWidget(self.low_entry)
+        self.low_entry.setText(str(settings.dict[low_key]))
         if validator:
-            low_entry.setValidator(validator)
+            self.low_entry.setValidator(validator)
 
-        high_entry = qtw.QLineEdit()
-        layout.addWidget(high_entry)
-        high_entry.setText(str(settings.dict[high_key]))
+        self.high_entry = qtw.QLineEdit()
+        layout.addWidget(self.high_entry)
+        self.high_entry.setText(str(settings.dict[high_key]))
         if validator:
-            high_entry.setValidator(validator)
+            self.high_entry.setValidator(validator)
 
-        def low_callback():
-            low_value = value_type(low_entry.text())
-            high_value = value_type(high_entry.text())
+        self.low_entry.editingFinished.connect(self.low_callback)
+        self.high_entry.editingFinished.connect(self.high_callback)
 
-            if low_value >= high_value:
-                low_entry.setStyleSheet("QLineEdit { background-color: pink}")
-            else:
-                low_entry.setStyleSheet("QLineEdit { background-color: white}")
-                settings.dict[low_key] = low_value
-                if callback is not None:
-                    try:
-                        for each in callback:
-                            each()
-                    except TypeError:
-                        callback()
+    def low_callback(self):
+        low_value = self.value_type(self.low_entry.text())
+        high_value = self.value_type(self.high_entry.text())
 
-        def high_callback():
-            low_value = value_type(low_entry.text())
-            high_value = value_type(high_entry.text())
+        if low_value >= high_value:
+            self.low_entry.setStyleSheet("QLineEdit { background-color: pink}")
+        else:
+            self.common_callback(low_value, high_value)
 
-            if high_value <= low_value:
-                high_entry.setStyleSheet("QLineEdit { background-color: pink}")
-            else:
-                high_entry.setStyleSheet("QLineEdit { background-color: white}")
-                settings.dict[high_key] = high_value
-                if callback is not None:
-                    try:
-                        for each in callback:
-                            each()
-                    except TypeError:
-                        callback()
-        low_entry.editingFinished.connect(low_callback)
-        high_entry.editingFinished.connect(high_callback)
+    def high_callback(self):
+        low_value = self.value_type(self.low_entry.text())
+        high_value = self.value_type(self.high_entry.text())
+
+        if high_value <= low_value:
+            self.high_entry.setStyleSheet("QLineEdit { background-color: pink}")
+        else:
+            self.common_callback(low_value, high_value)
+
+    def common_callback(self, low_value, high_value):
+        self.high_entry.setStyleSheet("QLineEdit { background-color: white}")
+        self.low_entry.setStyleSheet("QLineEdit { background-color: white}")
+        self.settings.dict[self.low_key] = low_value
+        self.settings.dict[self.high_key] = high_value
+        if self.callback is not None:
+            try:
+                for each in self.callback:
+                    each()
+            except TypeError:
+                self.callback()
+
+    def set_range(self, low, high):
+        self.low_entry.setText(str(low))
+        self.low_callback()
+        self.high_entry.setText(str(high))
+        self.high_callback()
 
 
 class SettingsFileBox(qtw.QWidget):
@@ -145,6 +157,7 @@ class SettingsFileBox(qtw.QWidget):
         self.key = key
 
         layout = qtw.QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
 
         if self.do_save:
@@ -196,6 +209,10 @@ class SettingsFileBox(qtw.QWidget):
         if selected_file:
             self.settings.dict[self.key] = str(pathlib.Path(selected_file))
             self.label.setText(selected_file)
+        self.label.setStyleSheet("QLineEdit { background-color: white}")
+
+    def notify_bad_selection(self):
+        self.label.setStyleSheet("QLineEdit { background-color: pink}")
 
 
 class SettingsComboBox(qtw.QWidget):
@@ -206,6 +223,7 @@ class SettingsComboBox(qtw.QWidget):
         self.settings_options = settings_options
 
         layout = qtw.QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
         layout.addWidget(qtw.QLabel(label))
 
@@ -233,6 +251,7 @@ class SettingsVectorBox(qtw.QWidget):
         self.settings_key = settings_key
 
         layout = qtw.QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
         layout.addWidget(qtw.QLabel(label))
         self.entries = []
@@ -273,22 +292,21 @@ class SettingsVectorBox(qtw.QWidget):
 
 
 class SettingsCheckBox(qtw.QWidget):
-    def __init__(self, component, label, settings_key, callback=None):
+    def __init__(self, settings, key, label, callback=None):
         super().__init__()
-        self.component = component
-        self.settings_key = settings_key
 
         layout = qtw.QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
         layout.addWidget(qtw.QLabel(label))
 
         check_box = qtw.QCheckBox()
         layout.addWidget(check_box)
-        check_box.setCheckState(self.component.settings.dict[settings_key])
+        check_box.setCheckState(settings.dict[key])
         check_box.setTristate(False)
 
         def set_setting(new_state):
-            self.component.settings.dict[self.settings_key] = bool(new_state)
+            settings.dict[key] = bool(new_state)
 
         check_box.stateChanged.connect(set_setting)
 
@@ -298,6 +316,25 @@ class SettingsCheckBox(qtw.QWidget):
                     check_box.stateChanged.connect(each)
             except TypeError:
                 check_box.stateChanged.connect(callback)
+
+
+class ColorEntryButton(qtw.QPushButton):
+    def __init__(self, settings, key, callback=None):
+        super().__init__()
+        self.setText("Color")
+        self.clicked.connect(self.click)
+        self.callback = callback
+        self.settings = settings
+        self.key = key
+
+    def click(self):
+        color = qtw.QColorDialog.getColor().name()
+        self.settings.dict[self.key] = color
+        self.setStyleSheet(f"QPushButton {{ background-color: {color}}}")
+        self.callback()
+
+
+# ======================================================================================================================
 
 
 class MPLWidget(qtw.QWidget):
@@ -368,6 +405,7 @@ class MPLWidget(qtw.QWidget):
             self.ax.axes.get_yaxis().set_major_locator(plt.NullLocator())
 
         layout = qtw.QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         if name:
             label = qtw.QLabel(name)
             label.setSizePolicy(qtw.QSizePolicy.Minimum, qtw.QSizePolicy.Fixed)
@@ -378,6 +416,27 @@ class MPLWidget(qtw.QWidget):
 
     def draw(self):
         self.fig_canvas.draw()
+
+
+class MplImshowWidget(MPLWidget):
+    def __init__(
+        self,
+        initial_data=None,
+        blank=False,
+        *args,
+        **kwargs
+    ):
+        super().__init__(blank=blank, *args, **kwargs)
+        if initial_data is None:
+            initial_data = np.zeros((5, 5))
+        self.plot = self.ax.imshow(initial_data, origin="lower", cmap="gray")
+
+    def set_data(self, data):
+        self.plot.set_data(data)
+        #self.ax.set_xlim(0, data.shape[0])
+        #self.ax.set_ylim(0, data.shape[1])
+        self.plot.set_clim(np.min(data), np.max(data))
+        self.draw()
 
 
 # ======================================================================================================================
@@ -393,6 +452,7 @@ class ParameterController(qtw.QWidget):
 
         # Build the UI elements
         main_layout = qtw.QGridLayout()
+        main_layout.setContentsMargins(11, 11, 0, 11)
         self.setLayout(main_layout)
 
         # Parameter list
@@ -606,6 +666,7 @@ class OpticController(qtw.QWidget):
 
         # build the UI elements
         main_layout = qtw.QVBoxLayout()
+        main_layout.setContentsMargins(11, 11, 0, 11)
         self.setLayout(main_layout)
 
         if self._output_valid:
@@ -715,6 +776,7 @@ class MeshTricksController(qtw.QWidget):
 
         # Build the UI elements
         main_layout = qtw.QGridLayout()
+        main_layout.setContentsMargins(11, 11, 0, 11)
         self.setLayout(main_layout)
 
         # Set up the vum origin
@@ -736,7 +798,7 @@ class MeshTricksController(qtw.QWidget):
             self.component.settings.establish_defaults(vum_origin_visible=False)
             main_layout.addWidget(
                 SettingsCheckBox(
-                    self.component, "Show vum origin", "vum_origin_visible", self.toggle_vum_origin_display
+                    self.component.settings, "vum_origin_visible", "Show vum origin", self.toggle_vum_origin_display
                 ), 2, 1, 1, 1
             )
             self.toggle_vum_origin_display(self.component.settings.vum_origin_visible)
@@ -760,7 +822,7 @@ class MeshTricksController(qtw.QWidget):
             self.component.settings.establish_defaults(acum_origin_visible=False)
             main_layout.addWidget(
                 SettingsCheckBox(
-                    self.component, "Show accumulator origin", "acum_origin_visible", self.toggle_acum_origin_display
+                    self.component.settings, "acum_origin_visible", "Show accumulator origin", self.toggle_acum_origin_display
                 ), 2, 0, 1, 1
             )
             self.toggle_acum_origin_display(self.component.settings.acum_origin_visible)
@@ -770,11 +832,11 @@ class MeshTricksController(qtw.QWidget):
             self.component.settings.establish_defaults(vum_active=True)
             self.component.settings.establish_defaults(vum_visible=False)
             main_layout.addWidget(
-                SettingsCheckBox(self.component, "VUM Active", "vum_active"),
+                SettingsCheckBox(self.component.settings, "vum_active", "VUM Active"),
                 3, 1, 1, 1
             )
             main_layout.addWidget(
-                SettingsCheckBox(self.component, "VUM Visible", "vum_visible", self.update_vum_display),
+                SettingsCheckBox(self.component.settings, "vum_visible", "VUM Visible", self.update_vum_display),
                 4, 1, 1, 1
             )
         else:
@@ -786,7 +848,7 @@ class MeshTricksController(qtw.QWidget):
         if self.component.enable_accumulator:
             self.component.settings.establish_defaults(accumulator_active=True)
             main_layout.addWidget(
-                SettingsCheckBox(self.component, "Accumulator Active", "accumulator_active"),
+                SettingsCheckBox(self.component.settings, "accumulator_active", "Accumulator Active"),
                 3, 0, 1, 1
             )
         else:

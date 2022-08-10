@@ -28,8 +28,9 @@ class OpticalSystem(TraceEngine3D):
 
     """
     dimension = 3
+    protected_names = {"goal", "auto_target"}
 
-    def __init__(self, driver, component_declaration, materials, settings_file_name="settings.data"):
+    def __init__(self, driver, component_declaration, materials, settings_file_name="settings.data", **kwargs):
         """
 
         Parameters
@@ -46,7 +47,7 @@ class OpticalSystem(TraceEngine3D):
         settings_file_name : str
             Path to the settings file to synchronize with this system.  Local to the driver's path
         """
-        super().__init__(tuple(materials))
+        super().__init__(tuple(materials), **kwargs)
         self.driver = driver
         self.settings = settings.Settings()
         self.self_path = self.driver.settings.system_path
@@ -57,6 +58,7 @@ class OpticalSystem(TraceEngine3D):
             pass
 
         # boxes of parts, sorted by type
+        self.goal = None
         self.opticals = []
         self.stops = []
         self.targets = []
@@ -72,7 +74,7 @@ class OpticalSystem(TraceEngine3D):
         # Check the component declaration, and initialize settings for each component
         self._part_boxes = {}
         for name, tp in component_declaration.items():
-            if hasattr(self, name):
+            if hasattr(self, name) or name in self.protected_names:
                 raise ValueError(f"OpticalSystem: Tried to declare component {name} but this is a protected name.")
             if tp not in {"optical", "stop", "target", "source"}:
                 raise ValueError(
@@ -105,6 +107,15 @@ class OpticalSystem(TraceEngine3D):
         if hasattr(part, "parameters"):
             self.parametric_optics.append(part)
 
+    def set_goal(self, goal):
+        if self.goal is not None:
+            print(
+                "OpticalSystem Warning: Goal was already set but set_goal was called again.  A system can only have "
+                "one goal"
+            )
+        self.goal = goal
+        self.parts["goal"] = goal
+
     def update(self):
         for part in self.parts.values():
             part.update()
@@ -128,4 +139,20 @@ class OpticalSystem(TraceEngine3D):
             self.source_rays = tf.concat([s.rays for s in self.sources], axis=0)
         else:
             self.source_rays = tf.zeros((0, 7), dtype=tf.float64)
+
+    def get_ray_sample(self, raycount_factor=1):
+        if self.sources:
+            for s in self.sources:
+                s.update(raycount_factor)
+            return tf.concat([s.rays for s in self.sources], axis=0)
+        else:
+            return tf.zeros((0, 7), dtype=tf.float64)
+
+    def cleanup(self):
+        if self.goal is not None:
+            self.goal.cleanup()
+
+    def post_init(self):
+        if self.goal is not None:
+            self.goal.try_update_target()
 

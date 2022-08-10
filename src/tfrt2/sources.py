@@ -116,6 +116,9 @@ class Source3D:
             self.source_controller = None
             self.controller_widgets = None
         self.system_path = system_path
+        self.start_seed = None
+        self.end_seed = None
+        self.wavelength_seed = None
 
         self.make_wavelengths = self._process_wavelength(wavelength)
         self.base_points = self._register_controller(base_points)
@@ -127,10 +130,9 @@ class Source3D:
                 # in aperature mode
                 self.make_end_points = self._register_controller(aperture)
                 self.settings.establish_defaults(aperture_distance=aperture_distance)
-                if self.driver.driver_type == "client":
-                    self.controller_widgets.append(cw.SettingsEntryBox(
-                        self.settings, "aperture_distance", float, qtg.QDoubleValidator(1e-9, 1e6, 10)
-                    ))
+                self._register_controller(cw.SettingsEntryBox(
+                    self.settings, "aperture_distance", float, qtg.QDoubleValidator(1e-9, 1e6, 10)
+                ))
         else:
             if aperture is None:
                 # in angles mode
@@ -151,33 +153,38 @@ class Source3D:
         self.wavelengths = tf.zeros((0, 3), dtype=tf.float64)
         self.rays = tf.zeros((0, 7), dtype=tf.float64)
 
-    def update(self):
+    def update(self, raycount_factor=1):
         if self.settings.source_active:
-            start_seed, end_seed, wavelength_seed = self.get_seeds(self.settings.ray_count)
-            self.base_start_points = self.make_start_points(start_seed)
-            rotated_start_points = tfq.rotate_vector_by_quaternion(self.rotation, self.base_start_points)
-            self.start_points = rotated_start_points + self.translation
-
-            base_end_points = self.make_end_points(end_seed)
+            self.start_seed, self.end_seed, self.wavelength_seed = self.get_seeds(
+                int(self.settings.ray_count * raycount_factor)
+            )
+            base_start_points = self.make_start_points(self.start_seed)
+            base_end_points = self.make_end_points(self.end_seed)
             if base_end_points.shape[1] == 2:
-                # Is an aperture - need to expand
+                # Is in aperture mode - need to expand to 3D
                 base_end_points = np.pad(
                     base_end_points, ((0, 0), (0, 1)), constant_values=self.settings.aperture_distance
                 )
-            self.base_end_points = tf.constant(base_end_points, dtype=tf.float64)
-            rotated_end_points = tfq.rotate_vector_by_quaternion(self.rotation, self.base_end_points)
+            else:
+                # Is in angles mode - need to make relative to base points
+                base_end_points = tf.constant(base_end_points, dtype=tf.float64) + base_start_points
+
+            # Do rotation / translation
+            rotated_start_points = tfq.rotate_vector_by_quaternion(self.rotation, base_start_points)
+            self.start_points = rotated_start_points + self.translation
+            rotated_end_points = tfq.rotate_vector_by_quaternion(self.rotation, base_end_points)
             self.end_points = rotated_end_points + self.translation
 
             # set up wavelength mode
             self.wavelengths = tf.constant(tf.reshape(
-                self.make_wavelengths(wavelength_seed), (-1, 1)
+                self.make_wavelengths(self.wavelength_seed), (-1, 1)
             ), dtype=tf.float64)
         else:
-            self.base_start_points = tf.zeros((0, 3), dtype=tf.float64)
-            self.start_points = self.base_start_points
-
-            self.base_end_points = tf.zeros((0, 3), dtype=tf.float64)
-            self.end_points = self.base_end_points
+            self.start_seed = tf.zeros((), dtype=tf.float64)
+            self.end_seed = tf.zeros((), dtype=tf.float64)
+            self.wavelength_seed = tf.zeros((), dtype=tf.float64)
+            self.start_points = tf.zeros((0, 3), dtype=tf.float64)
+            self.end_points = tf.zeros((0, 3), dtype=tf.float64)
 
             # set up wavelength mode
             self.wavelengths = tf.zeros((0, 1), dtype=tf.float64)
@@ -213,7 +220,7 @@ class Source3D:
 
     def _process_wavelength(self, wavelength):
         if callable(wavelength):
-            return lambda x: tf.constant(wavelength(x), dtype=tf.float64)
+            return lambda x: tf.convert_to_tensor(wavelength(x), dtype=tf.float64)
         elif type(wavelength) is wv.Spectrum:
             controller = SpectrumController(self, spectrum=wavelength)
             if self.driver.driver_type == "client":
@@ -222,7 +229,7 @@ class Source3D:
         elif type(wavelength) is str:
             if wavelength == "":
                 wavelength = Path(__file__).parent / "default_spectrum.dat"
-                self.settings.spectrum_path = str(wavelength)
+                self.settings.establish_defaults(spectrum_path=str(wavelength))
             controller = SpectrumController(self, path=wavelength)
             if self.driver.driver_type == "client":
                 self.controller_widgets.append(controller)
@@ -273,6 +280,7 @@ class SourceController(qtw.QWidget):
 
         # build the UI elements
         main_layout = qtw.QVBoxLayout()
+        main_layout.setContentsMargins(11, 11, 0, 11)
         self.setLayout(main_layout)
 
         sub_layout = qtw.QHBoxLayout()
@@ -281,7 +289,7 @@ class SourceController(qtw.QWidget):
         ))
         self.component.settings.establish_defaults(source_active=True)
         sub_layout.addWidget(cw.SettingsCheckBox(
-            self.component, "Active", "source_active", self.redraw
+            self.component.settings, "source_active", "Active", self.redraw
         ))
         main_layout.addLayout(sub_layout)
         main_layout.addWidget(cw.SettingsVectorBox(
@@ -304,6 +312,7 @@ class SpectrumController(qtw.QWidget):
         self.spectral_plot = None
         super().__init__()
         layout = qtw.QVBoxLayout()
+        layout.setContentsMargins(11, 11, 0, 11)
         self.setLayout(layout)
         self.loadable = False
         if path is None:
@@ -324,7 +333,7 @@ class SpectrumController(qtw.QWidget):
             # Checkbox and display for the spectrum
             self.settings.establish_defaults(show_spectrum=False)
             layout.addWidget(
-                cw.SettingsCheckBox(self.source, "Show spectrum", "show_spectrum", self.show_spectrum)
+                cw.SettingsCheckBox(self.source.settings, "show_spectrum", "Show spectrum", self.show_spectrum)
             )
             self.plot_widget = cw.MPLWidget(alignment=(0, .25, 1.0, .7))
             self.plot_widget.ax.yaxis.set_visible(False)

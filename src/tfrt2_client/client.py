@@ -18,6 +18,8 @@ import PyQt5.QtWidgets as qtw
 import PyQt5.QtCore as qtc
 import PyQt5.QtGui as qtg
 import pyvistaqt as pvqt
+import numpy as np
+import matplotlib.pyplot as plt
 
 import tfrt2.drawing as drawing
 import tfrt2.settings as settings
@@ -25,10 +27,21 @@ import tfrt2.component_widgets as component_widgets
 import tfrt2.wavelength as wavelength
 import tfrt2.optics as optics
 import tfrt2.client_TCP_widget as tcp_widget
+from tfrt2.optimization_controls import OptimizationPane
 
 
 class OpticClientWindow(qtw.QWidget):
     driver_type = "client"
+    rayset_enum = {
+        0: "None",
+        1: "active_rays",
+        2: "finished_rays",
+        3: "dead_rays",
+        4: "stopped_rays",
+        5: "all_rays",
+        6: "source_rays",
+        7: "unfinished_rays"
+    }
 
     def __init__(self):
         super().__init__(windowTitle="Linear Mark 5 Dev Client")
@@ -44,21 +57,28 @@ class OpticClientWindow(qtw.QWidget):
             print("Client: exception while trying to load the client settings:")
             print(traceback.format_exc())
 
-        # Initialize all manner of base class variables
-        self.ui = types.SimpleNamespace()
-        self.optical_system = None
+        # 3D system plot
         self.plot = pvqt.QtInteractor()
         self.plot.camera.clipping_range = (.00001, 10000)
         self.plot.add_axes()
+
+        # Initialize all manner of base class variables
+        self.ui = types.SimpleNamespace()
+        self.optical_system = None
         self.display_pane = DisplayControls(self)
         self.trace_pane = TraceControls(self)
         self.parameters_pane = ParameterControls(self)
         self.components_pane = ComponentControls(self)
-        self.pane_stack = None
+        self.optimize_pane = OptimizationPane(self)
+        self.ui.pane_stack = None
         self._quit = threading.Event()
-        self.retrace_button = qtw.QPushButton("Re-trace")
-        self.retrace_button.setEnabled(False)
-        self.tcp_widget = None
+        self.ui.retrace_button = qtw.QPushButton("Re-trace")
+        self.ui.retrace_button.setEnabled(False)
+        self.tcp_widget = tcp_widget.ClientTCPWidget(self)
+
+        # Illuminance plot
+        plt.style.use("dark_background")
+        self.ui.illuminance_widget = component_widgets.MplImshowWidget(blank=True, alignment=(.05, .05, .9, .9))
 
         # Spawn a thread for performing local tracing
         self._update_rays_sig = UpdateRaysSignal()
@@ -75,7 +95,7 @@ class OpticClientWindow(qtw.QWidget):
         self.build_ui([
             ("Display Settings", self.display_pane),
             ("Components", self.components_pane),
-            ("Optimization", qtw.QWidget()),
+            ("Remote Operations", self.optimize_pane),
             ("Tracing Controls", self.trace_pane),
             ("Parameters", self.parameters_pane),
         ])
@@ -104,7 +124,7 @@ class OpticClientWindow(qtw.QWidget):
         load_layout.addWidget(load_button)
         reload_button = qtw.QPushButton("Reload")
         reload_button.clicked.connect(self.reload_system)
-        reload_button.setEnabled(False)
+        reload_button.setEnabled(True)
         reload_button.setMaximumWidth(45)
         self.ui.reload_button = reload_button
         load_layout.addWidget(reload_button)
@@ -119,8 +139,8 @@ class OpticClientWindow(qtw.QWidget):
         redraw_button = qtw.QPushButton("Redraw")
         redraw_button.clicked.connect(self.redraw)
         redraw_layout.addWidget(redraw_button)
-        self.retrace_button.clicked.connect(self.retrace)
-        redraw_layout.addWidget(self.retrace_button)
+        self.ui.retrace_button.clicked.connect(self.retrace)
+        redraw_layout.addWidget(self.ui.retrace_button)
         clear_rays_button = qtw.QPushButton("Clear Rays")
         clear_rays_button.clicked.connect(self.trace_pane.clear_rays)
         redraw_layout.addWidget(clear_rays_button)
@@ -146,7 +166,6 @@ class OpticClientWindow(qtw.QWidget):
         update_layout.addWidget(retrace_toggle)
 
         # The TCP client widget
-        self.tcp_widget = tcp_widget.ClientTCPWidget(self)
         control_layout.addWidget(self.tcp_widget)
 
         # A selector to choose which set of interface controls are visible
@@ -156,27 +175,34 @@ class OpticClientWindow(qtw.QWidget):
         control_layout.addWidget(tab_selector)
 
         # Add the interface control stack
-        self.pane_stack = qtw.QStackedWidget()
+        self.ui.pane_stack = qtw.QStackedWidget()
         for pane in control_panes:
             scroll_area = qtw.QScrollArea()
             scroll_area.setHorizontalScrollBarPolicy(qtc.Qt.ScrollBarAlwaysOff)
             scroll_area.setWidgetResizable(True)
             pane[1].parent_scroll_area = scroll_area
             scroll_area.setWidget(pane[1])
-            self.pane_stack.addWidget(scroll_area)
+            self.ui.pane_stack.addWidget(scroll_area)
         # Try setting the selector via settings
         try:
             tab_selector.setCurrentIndex(self.settings.active_pane)
         except Exception:
             pass
-        self.pane_stack.setMaximumWidth(self.control_pane_width)
-        control_layout.addWidget(self.pane_stack)
+        self.ui.pane_stack.setMaximumWidth(self.control_pane_width)
+        control_layout.addWidget(self.ui.pane_stack)
+
+        # Add a tabbed area to show visualizations
+        visualization_tabs = qtw.QTabWidget()
+        main_layout.addWidget(visualization_tabs, 0, 1)
 
         # Add the main 3D plot to the UI
-        main_layout.addWidget(self.plot, 0, 1)
+        visualization_tabs.addTab(self.plot, "3D System Visualization")
+
+        # Add a 2D illuminance plot to the UI
+        visualization_tabs.addTab(self.ui.illuminance_widget, "Illuminance Plot")
 
     def change_active_pane(self, i):
-        self.pane_stack.setCurrentIndex(i)
+        self.ui.pane_stack.setCurrentIndex(i)
         self.settings.active_pane = i
 
     def load_system(self, _, path=None):
@@ -200,6 +226,8 @@ class OpticClientWindow(qtw.QWidget):
         # save the system settings now before overwriting or doing anything else
         self.save_system()
         self.tcp_widget.reset_system()
+        if self.optical_system is not None:
+            self.optical_system.cleanup()
 
         # load the system at this location
         try:
@@ -216,26 +244,31 @@ class OpticClientWindow(qtw.QWidget):
 
             self.settings.system_path = path
             self.optical_system = system_module.get_system(self)
+            self.optical_system.post_init()
 
             # If we reach here than we have achieved success!
             self.ui.loaded_label.setText(f"Current System: {str(path)}")
-            self.ui.reload_button.setEnabled(True)
-            self.retrace_button.setEnabled(True)
+            self.ui.retrace_button.setEnabled(True)
 
             self.redraw()
             self.try_auto_retrace()
             self.click_reset()
+        except FileNotFoundError:
+            print("Invalid file")
+            self.ui.loaded_label.setText("Current System: None")
+            self.optical_system = None
+            self.ui.retrace_button.setEnabled(False)
         except Exception:
             print(f"Client: got exception while trying to load the system at {path}:")
             print(traceback.format_exc())
             self.ui.loaded_label.setText("Current System: None")
             self.optical_system = None
-            self.ui.reload_button.setEnabled(False)
-            self.retrace_button.setEnabled(False)
+            self.ui.retrace_button.setEnabled(False)
 
         # Update the control panes with the new system
         self.populate_panes_from_system(self.optical_system)
         self.tcp_widget.check_system_state()
+        self.optimize_pane.try_activate()
 
     def populate_panes_from_system(self, system):
         self.display_pane.update_with_system(system)
@@ -260,8 +293,8 @@ class OpticClientWindow(qtw.QWidget):
         self.display_pane.redraw()
 
     def retrace(self):
-        self.retrace_button.setEnabled(False)
-        self.retrace_button.setText("Working...")
+        self.ui.retrace_button.setEnabled(False)
+        self.ui.retrace_button.setText("Working...")
         self._start_local_trace.set()
 
     def try_auto_retrace(self):
@@ -280,6 +313,9 @@ class OpticClientWindow(qtw.QWidget):
                 try:
                     self.optical_system.update()
                     self.optical_system.ray_trace(self.settings.trace_depth)
+                    #self.optical_system.fast_trace(self.settings.trace_depth)
+                    #sample = self.optical_system.get_trace_samples(self.settings.trace_depth)
+                    #self.optical_system.precompiled_trace(self.settings.trace_depth, sample)
                 except Exception:
                     print(f"Client: got exception while tracing")
                     print(traceback.format_exc())
@@ -288,12 +324,12 @@ class OpticClientWindow(qtw.QWidget):
 
     def _update_ray_drawer(self):
         self.trace_pane.redraw()
-        self.retrace_button.setEnabled(True)
-        self.retrace_button.setText("Re-trace")
+        self.ui.retrace_button.setEnabled(True)
+        self.ui.retrace_button.setText("Re-trace")
 
     def click_reset(self):
         self.plot.renderer.reset_camera()
-        self.plot.camera.clipping_range = (.00001, 10000)
+        #self.plot.camera.clipping_range = (.00001, 10000)
 
     def click_update_toggle(self, state):
         self.settings.auto_update_on_redraw = int(state)
@@ -378,7 +414,7 @@ class DisplayControls(qtw.QWidget):
         self.updateGeometry()
         if self.parent_scroll_area:
             self.parent_scroll_area.updateGeometry()
-        self.parent_client.pane_stack.updateGeometry()
+        self.parent_client.ui.pane_stack.updateGeometry()
 
         self.redraw()
 
@@ -425,11 +461,15 @@ class ComponentControls(qtw.QWidget):
                     for widget in controller_widgets:
                         widget.client = self.parent_client
                         self.add_widget(widget)
+            # Try adding the goal widget, if it exists
+            if system.goal is not None:
+                self.add_widget(qtw.QLabel("Goal"))
+                self.add_widget(system.goal.controller)
 
         self.updateGeometry()
         if self.parent_scroll_area:
             self.parent_scroll_area.updateGeometry()
-        self.parent_client.pane_stack.updateGeometry()
+        self.parent_client.ui.pane_stack.updateGeometry()
 
     def save_system(self):
         for widget in self._added_widgets:
@@ -440,17 +480,6 @@ class ComponentControls(qtw.QWidget):
 
 
 class TraceControls(qtw.QWidget):
-    rayset_enum = {
-        0: "None",
-        1: "active_rays",
-        2: "finished_rays",
-        3: "dead_rays",
-        4: "stopped_rays",
-        5: "all_rays",
-        6: "source_rays",
-        7: "unfinished_rays"
-    }
-
     def __init__(self, parent):
         super().__init__()
         self.parent_client = parent
@@ -499,7 +528,7 @@ class TraceControls(qtw.QWidget):
         main_layout.addWidget(qtw.QLabel("Choose which rayset to display."), 2, 0, 1, 2)
 
         rayset_selector = qtw.QComboBox()
-        rayset_selector.insertItems(0, [value.replace("_", " ") for value in self.rayset_enum.values()])
+        rayset_selector.insertItems(0, [value.replace("_", " ") for value in self.parent_client.rayset_enum.values()])
         rayset_selector.setCurrentIndex(parent.settings.active_set)
 
         def change_rayset(i):
@@ -510,7 +539,9 @@ class TraceControls(qtw.QWidget):
         rayset_selector.currentIndexChanged.connect(change_rayset)
         main_layout.addWidget(rayset_selector, 3, 0, 1, 2)
 
-        def click_get_samples():
+        # The commented out block was created as a debug tool, for the precompiled trace.  I am leaving the code here
+        # though I hope I never need to use it again.
+        """def click_get_samples():
             if parent.optical_system is not None:
                 params, source_rays, triangles = parent.optical_system.get_trace_samples(parent.settings.trace_depth)
                 print("parameters")
@@ -533,18 +564,22 @@ class TraceControls(qtw.QWidget):
 
         trace_samples_button = qtw.QPushButton("Get Samples and Trace")
         trace_samples_button.clicked.connect(click_trace_from_samples)
-        main_layout.addWidget(trace_samples_button, 4, 1)
+        main_layout.addWidget(trace_samples_button, 4, 1)"""
 
     def redraw(self):
         if self.parent_client.optical_system is None:
             self.ray_drawer.rays = None
         else:
-            rayset = self.rayset_enum[self.parent_client.settings.active_set]
+            rayset = self.parent_client.rayset_enum[self.parent_client.settings.active_set]
             if rayset == "None":
                 self.ray_drawer.rays = None
             else:
                 self.parent_client.optical_system.refresh_source_rays()
                 self.ray_drawer.rays = getattr(self.parent_client.optical_system, rayset)
+                try:
+                    self.parent_client.optical_system.goal.try_redraw_goal()
+                except Exception:
+                    pass
         self.ray_drawer.draw()
 
     def clear_rays(self):

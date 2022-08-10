@@ -156,7 +156,7 @@ class Spectrum(cdf.CumulativeDistributionFunction1D):
         )
         ax.set_ylim(0, y_max)
         ax.set_aspect("auto")
-        ax.fill_between(x, self._density, y_max, color="w")
+        ax.fill_between(x, self._density, y_max, color="black")
 
         return rtn
 

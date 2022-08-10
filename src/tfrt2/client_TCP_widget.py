@@ -16,12 +16,19 @@ class ClientTCPWidget(qtw.QWidget):
     Please note that in order to use this widget inside a large application, the application must call reactor.run()
     before instantiating this widget to get the twisted message loop running.
     """
+    # Connection state enum
     NO_CONNECTION = 0
     CONNECTED = 1
     PENDING = 2
     DISCONNECTED_LOCAL = 3
     DISCONNECTED_REMOTE = 4
     VALIDATION_FAIL = 5
+
+    # Processing state enum
+    UNKNOWN = 0
+    PROCESSING = 1
+    ABORTING = 2
+    READY = 3
 
     client_settings_purges = {
         "system_path", "active_pane", "server_port", "server_ip", "auto_update_on_redraw", "auto_retrace"
@@ -43,6 +50,8 @@ class ClientTCPWidget(qtw.QWidget):
         self.files_sent_to_server = {}
         self.total_sync_tasks = 0
         self.completed_sync_tasks = 0
+        self.waiting_for_server_reset = False
+        self.waiting_to_send_system = False
 
         # A lookup table of methods to call to process the data contained in various messages
         self.message_LUT = {
@@ -52,9 +61,15 @@ class ClientTCPWidget(qtw.QWidget):
             tcp.SERVER_S_SET_ACK: self.server_ack_sys_settings,
             tcp.SERVER_FTP_ACK: self.server_ftp_ack,
             tcp.SERVER_SYS_L_ACK: self.server_system_load_ack,
-            tcp.SERVER_TRACE_RSLT: self.receive_ray_trace_results,
+            tcp.SERVER_TRACE_RSLT: self.client.optimize_pane.receive_ray_trace_results,
             tcp.SERVER_PARAMS: self.receive_parameters,
             tcp.SERVER_PARAM_ACK: self.server_params_ack,
+            tcp.SERVER_MESSAGE: self.print_server_message,
+            tcp.SERVER_ILUM: self.client.optimize_pane.receive_illuminance,
+            tcp.SERVER_SYS_RST_ACK: self.server_ack_sys_reset,
+            tcp.SERVER_READY: self.receive_server_ready,
+            tcp.SERVER_BUSY: self.receive_server_busy,
+            tcp.SERVER_FLATTENER: self.feed_flattener
         }
 
         # Establish settings defaults
@@ -62,6 +77,7 @@ class ClientTCPWidget(qtw.QWidget):
 
         # Build the UI
         layout = qtw.QGridLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
         layout.addWidget(qtw.QLabel("TCP Connection to server"), 0, 0, 1, 2)
 
@@ -93,54 +109,64 @@ class ClientTCPWidget(qtw.QWidget):
         sync_layout = qtw.QGridLayout()
         self.sync_controls.setLayout(sync_layout)
 
-        sync_layout.addWidget(qtw.QLabel("Synchronization with Server"), 0, 0, 1, 2)
+        sync_layout.addWidget(qtw.QLabel("Synchronization with Server"), 0, 0, 1, 6)
 
         # Button that will start the synchronization process
-        sync_button = qtw.QPushButton("Synchronize")
-        sync_layout.addWidget(sync_button, 1, 0)
-        sync_button.clicked.connect(self.sync_with_server)
+        self.sync_button = qtw.QPushButton("Synchronize")
+        sync_layout.addWidget(self.sync_button, 1, 0, 1, 3)
+        self.sync_button.clicked.connect(self.sync_with_server)
 
         # Button that will cancel the synchronization process
         self.abort_button = qtw.QPushButton("Abort Synchronization")
         self.abort_button.setEnabled(False)
-        sync_layout.addWidget(self.abort_button, 1, 1)
+        sync_layout.addWidget(self.abort_button, 1, 3, 1, 3)
         self.abort_button.clicked.connect(self.abort_sync)
 
         # Progress bar indicating how many synchronization tasks remain to be completed
         self.sync_progress = qtw.QProgressBar()
         self.sync_progress.setRange(0, 1)
-        sync_layout.addWidget(self.sync_progress, 2, 0, 1, 2)
+        sync_layout.addWidget(self.sync_progress, 2, 0, 1, 6)
 
         # label indicating whether the sync was a success
         self.sync_status = qtw.QLabel("Status: ")
-        sync_layout.addWidget(self.sync_status, 3, 1)
+        sync_layout.addWidget(self.sync_status, 3, 3, 1, 3)
 
         # A toggleable task pane showing the name of each task that has yet to be completed.
         self.tasks_visible_checkbox = qtw.QCheckBox("Show synchronization tasks")
         self.tasks_visible_checkbox.setCheckState(False)
         self.tasks_visible_checkbox.setTristate(False)
         self.tasks_visible_checkbox.clicked.connect(self.toggle_task_pane)
-        sync_layout.addWidget(self.tasks_visible_checkbox, 3, 0)
+        sync_layout.addWidget(self.tasks_visible_checkbox, 3, 0, 1, 3)
 
         self.task_pane = qtw.QWidget()
         self.task_pane.hide()
         self.task_layout = qtw.QVBoxLayout()
         self.task_pane.setLayout(self.task_layout)
         self.task_pane.setStyleSheet("background-color: white;")
-        sync_layout.addWidget(self.task_pane, 4, 0, 1, 2)
+        sync_layout.addWidget(self.task_pane, 4, 0, 1, 6)
 
-        # A button to obtain a ray trace from the server
-        self.trace_button = qtw.QPushButton("Remote Raytrace")
-        self.trace_button.setEnabled(False)
-        self.trace_button.clicked.connect(self.request_ray_trace)
-        sync_layout.addWidget(self.trace_button, 5, 0)
+        # Display whether the server is busy with a long-running operation, and provide the ability to terminate
+        # it, if so.
+        sync_layout.addWidget(qtw.QLabel("Server Status:"), 5, 0, 1, 2)
+        self.processing_indicator = qtw.QLabel("INIT")
+        self.processing_indicator.setStyleSheet("border: 1px solid black;")
+        sync_layout.addWidget(self.processing_indicator, 5, 2, 1, 2)
+        self.processing_abort_button = qtw.QPushButton("Abort")
+        self.processing_abort_button.setEnabled(False)
+        self.processing_abort_button.clicked.connect(self.try_abort_processing)
+        sync_layout.addWidget(self.processing_abort_button, 5, 4, 1, 2)
+        self.set_processing_state(self.UNKNOWN)
 
         self.set_connection_state(self.NO_CONNECTION)
 
     def reset_system(self):
         self.abort_sync()
+        self.sync_status.setText("Status:")
         self.files_sent_to_server.clear()
-        self.trace_button.setEnabled(False)
+
+        if self.server_socket is not None:
+            self.server_socket.write(tcp.CLIENT_RESET_SYS)
+            self.waiting_for_server_reset = True
 
     def click_connection_button(self):
         if self.connection_state == self.CONNECTED:
@@ -172,16 +198,20 @@ class ClientTCPWidget(qtw.QWidget):
 
     def disconnected(self):
         self.close_connection(self.DISCONNECTED_REMOTE)
+        self.client.optimize_pane.deactivate()
+        self.set_processing_state(self.UNKNOWN)
 
     def got_validation(self, success):
         if success:
             self.set_connection_state(self.CONNECTED)
             self.server_validated = True
             self.sync_controls.show()
+            self.client.optimize_pane.try_activate(self.server_socket)
         else:
             self.set_connection_state(self.VALIDATION_FAIL)
             self.server_validated = False
             self.sync_controls.hide()
+            self.client.optimize_pane.deactivate()
 
     def socket_error(self, error):
         print(f"received socket error: {error}")
@@ -192,7 +222,6 @@ class ClientTCPWidget(qtw.QWidget):
         self.sync_controls.hide()
         self.clean_sync_stuff()
         self.files_sent_to_server.clear()
-        self.trace_button.setEnabled(False)
         self.server_validated = False
 
         if self.server_socket is not None:
@@ -203,6 +232,14 @@ class ClientTCPWidget(qtw.QWidget):
     def data_received(self, header, data):
         try:
             self.message_LUT[header](data)
+        except KeyError:
+            try:
+                self.client.optimize_pane.message_LUT[header](data)
+            except KeyError:
+                print(
+                    "Got a message from server that could not be accepted by either the TCP widget nor the "
+                    f"trace_controller: {str(header)}"
+                )
         except Exception:
             print("hit exception in data_received...")
             print(traceback.format_exc())
@@ -250,10 +287,14 @@ class ClientTCPWidget(qtw.QWidget):
         print("--End traceback--")
 
     def sync_with_server(self):
+        if self.waiting_for_server_reset:
+            self.waiting_to_send_system = True
+            return
+        self.waiting_to_send_system = False
+
         if self.client.optical_system is not None and self.server_socket.validated:
             self.clean_sync_stuff()
             self.abort_button.setEnabled(True)
-            self.trace_button.setEnabled(False)
             self.sync_status.setText("Status: Pending")
 
             self.add_sync_task("driver_settings", self.get_clean_driver_settings())
@@ -345,8 +386,6 @@ class ClientTCPWidget(qtw.QWidget):
             self.sync_status.setText("Status: Failure")
             label.setStyleSheet("background-color: pink;")
 
-
-
     def server_ack_driver_settings(self, data):
         self._server_ack(pickle.loads(data), "driver_settings")
 
@@ -361,7 +400,6 @@ class ClientTCPWidget(qtw.QWidget):
 
     def server_system_load_ack(self, data):
         self._server_ack(pickle.loads(data), "system_load")
-        self.trace_button.setEnabled(True)
         self.abort_button.setEnabled(False)
 
     def get_clean_system_settings(self):
@@ -424,13 +462,6 @@ class ClientTCPWidget(qtw.QWidget):
         else:
             self.sync_controls.hide()
 
-    def receive_ray_trace_results(self, data):
-        self.client.trace_pane.ray_drawer.rays = pickle.loads(data)
-        self.client.trace_pane.ray_drawer.draw()
-
-    def request_ray_trace(self):
-        self.server_socket.write(tcp.CLIENT_RQST_TRACE)
-
     def receive_parameters(self, data):
         for key, value in pickle.loads(data).items():
             self.client.optical_system.parts[key].param_assign(value)
@@ -441,3 +472,59 @@ class ClientTCPWidget(qtw.QWidget):
             if hasattr(value, "parameters"):
                 all_params[key] = value.parameters.numpy()
         self.server_socket.write(tcp.CLIENT_PARAMS, pickle.dumps(all_params))
+
+    @staticmethod
+    def print_server_message(data):
+        print("Message received from server")
+        print(pickle.loads(data))
+
+    def server_ack_sys_reset(self, _):
+        self.waiting_for_server_reset = False
+        if self.waiting_to_send_system:
+            self.sync_with_server()
+
+    def try_abort_processing(self):
+        self.set_processing_state(self.ABORTING)
+        self.server_socket.write(tcp.CLIENT_ABORT_PROCS)
+
+    def set_processing_state(self, state):
+        if state == self.PROCESSING:
+            self.processing_indicator.setText("  processing")
+            self.processing_indicator.setStyleSheet("QLabel { background-color: yellow}")
+            self.processing_abort_button.setEnabled(True)
+            self.set_state_frozen()
+        elif state == self.READY:
+            self.processing_indicator.setText("  ready")
+            self.processing_indicator.setStyleSheet("QLabel { background-color: green}")
+            self.processing_abort_button.setEnabled(False)
+            self.set_state_ready()
+        elif state == self.ABORTING:
+            self.processing_indicator.setText("  aborting")
+            self.processing_indicator.setStyleSheet("QLabel { background-color: red}")
+            self.processing_abort_button.setEnabled(False)
+        else:
+            self.processing_indicator.setText("  unknown")
+            self.processing_indicator.setStyleSheet("QLabel { background-color: gray}")
+            self.processing_abort_button.setEnabled(False)
+
+    def set_state_frozen(self):
+        self.sync_button.setEnabled(False)
+
+    def set_state_ready(self):
+        self.sync_button.setEnabled(True)
+
+    def receive_server_ready(self, _):
+        self.set_processing_state(self.READY)
+
+    def receive_server_busy(self, _):
+        self.set_processing_state(self.PROCESSING)
+
+    def feed_flattener(self, data):
+        flattening_density = pickle.loads(data)
+        try:
+            flattener = self.client.optical_system.goal.flattening_icdf
+            flattener.clear_density()
+            flattener.accumulate_density(flattening_density)
+            flattener.compute(direction="inverse")
+        except AttributeError:
+            pass

@@ -8,8 +8,8 @@ import tfrt2.optics as optics
 import tfrt2.vector_generator as vg
 import tfrt2.sources as sources
 import tfrt2.distributions as distributions
+import tfrt2.goal as goals
 from tfrt2.optical_system import OpticalSystem
-from tfrt2.goal import CPlaneGoal
 
 
 def get_system(driver):
@@ -33,13 +33,13 @@ class LocalSystem(OpticalSystem):
             color="cyan",
             show_edges=False,
             mesh_output_path=str(pathlib.Path(self.self_path) / "entrance_output.stl"),
-            mesh_input_path=str(pathlib.Path(self.self_path) / "mesh_input.stl"),
         )
         self.settings.lens.establish_defaults(
             visible=True,
             color="cyan",
             show_edges=True,
             mesh_output_path=str(pathlib.Path(self.self_path) / "lens_output.stl"),
+            mesh_input_path=str(pathlib.Path(self.self_path) / "mesh_input.stl"),
         )
 
         entrance_height = .005
@@ -49,36 +49,28 @@ class LocalSystem(OpticalSystem):
             self.driver,
             self.self_path,
             self.settings.entrance,
+            mesh=pv.Disc((0, 0, entrance_height), inner=0, outer=radius, c_res=32, normal=(0, 0, -1)).triangulate(),
             mat_in=1,
             mat_out=0,
-            flip_norm=True,
         )
         entrance.update()
-        self.feed_part("entrance", entrance)
-
-        def filter_fixed(vertices):
-            return np.sum((vertices**2)[:, :-1], axis=1) > (.98*radius) ** 2
 
         lens = optics.ParametricTriangleOptic(
             self.driver,
             self.self_path,
             self.settings.lens,
             vg.FromVectorVG((0.0, 0.0, 1.0)),
-            mesh=mt.circular_mesh(radius, .01).translate((0, 0, entrance_height), inplace=True),
             mat_in=1,
             mat_out=0,
-            filter_fixed=filter_fixed,
-            constraints=[optics.ClipConstraint(self.settings.lens, entrance_height + .05, 100)]
+            constraints=[optics.ClipConstraint(self.settings.lens, entrance_height + .05, .5)]
         )
-        self.feed_part("lens", lens)
 
         source = sources.Source3D(
-            self.driver, self.self_path, self.settings.source, "",
+            self.driver, self.self_path, self.settings.source, 580,
             base_points=distributions.Square(self.settings.source, driver, x_width=.05, y_width=.05),
             angles=distributions.PerfectLambertianSphere(self.settings.source, driver)
         )
-        self.feed_part("source", source)
 
-        self.set_goal(CPlaneGoal(
-            self.driver, self.settings, "cdf", ('x', -3.0, 3.0), ('y', -3.0, 3.0), 0, ""
-        ))
+        self.feed_parts(source=source, lens=lens, entrance=entrance)
+
+        self.set_goal(goals.CPlaneGoal(self.driver, self.settings, "uniform", ('x', -3.0, 3.0), ('y', -3.0, 3.0), 0))

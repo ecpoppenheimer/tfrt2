@@ -30,6 +30,7 @@ class Square(qtw.QWidget):
         self._y_key = y_key
         if driver.driver_type == "client":
             layout = qtw.QGridLayout()
+            layout.setContentsMargins(11, 11, 0, 11)
             self.setLayout(layout)
 
             layout.addWidget(qtw.QLabel(label), 0, 0, 1, 2)
@@ -72,6 +73,7 @@ class PixelatedCircle(qtw.QWidget):
 
         if driver.driver_type == "client":
             layout = qtw.QVBoxLayout()
+            layout.setContentsMargins(11, 11, 0, 11)
             self.setLayout(layout)
 
             layout.addWidget(cw.SettingsEntryBox(
@@ -98,7 +100,7 @@ class PerfectCircle(qtw.QWidget):
     a Fibonacci Spiral to make its points.
     """
 
-    def __init__(self, settings, driver, radius=1.0, resolution=50, mode="base_points"):
+    def __init__(self, settings, driver, radius=1.0, mode="base_points"):
         if mode == "base_points":
             r_key = "bp_radius"
             label = "Radius of the base points"
@@ -108,8 +110,6 @@ class PerfectCircle(qtw.QWidget):
         else:
             raise RuntimeError("PerfectCircle: Mode must be either 'base_points' or 'aperture'.")
         super().__init__()
-        if resolution % 2 == 0:
-            resolution += 1  # doesn't work if resolution isn't odd.
         self.settings = settings
         self._r_key = r_key
         self._factor = 2 * math.pi * (1 + 5**0.5)
@@ -117,6 +117,7 @@ class PerfectCircle(qtw.QWidget):
 
         if driver.driver_type == "client":
             layout = qtw.QVBoxLayout()
+            layout.setContentsMargins(11, 11, 0, 11)
             self.setLayout(layout)
 
             layout.addWidget(cw.SettingsEntryBox(
@@ -146,6 +147,7 @@ class PerfectUniformSphere(qtw.QWidget):
 
         if driver.driver_type == "client":
             layout = qtw.QVBoxLayout()
+            layout.setContentsMargins(11, 11, 0, 11)
             self.setLayout(layout)
 
             layout.addWidget(cw.SettingsEntryBox(
@@ -199,6 +201,7 @@ class PerfectLambertianSphere(qtw.QWidget):
 
         if driver.driver_type == "client":
             layout = qtw.QVBoxLayout()
+            layout.setContentsMargins(11, 11, 0, 11)
             self.setLayout(layout)
 
             layout.addWidget(cw.SettingsEntryBox(
@@ -261,6 +264,7 @@ class PixelatedLambertianSphere(qtw.QWidget):
         self.settings.establish_defaults(ray_length=ray_length, angular_cutoff=angular_cutoff)
         if driver.driver_type == "client":
             layout = qtw.QVBoxLayout()
+            layout.setContentsMargins(11, 11, 0, 11)
             self.setLayout(layout)
 
             layout.addWidget(cw.SettingsEntryBox(

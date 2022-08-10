@@ -8,6 +8,7 @@ import PyQt5.QtWidgets as qtw
 import tfrt2.mesh_tools as mt
 import tfrt2.component_widgets as cw
 import tfrt2.drawing as drawing
+from tfrt2.settings import Settings
 
 
 class TriangleOptic:
@@ -19,7 +20,8 @@ class TriangleOptic:
     dimension = 3
 
     def __init__(
-        self, driver, system_path, settings, mesh=None, mat_in=None, mat_out=None, hold_load=False, flip_norm=False
+        self, driver, system_path, input_settings, mesh=None, mat_in=None, mat_out=None, hold_load=False,
+        flip_norm=False
     ):
         """
         Basic 3D Triangulated optical surface.
@@ -79,7 +81,7 @@ class TriangleOptic:
             isn't specified.
 
         """
-        self.settings = settings or settings.Settings()
+        self.settings = input_settings or Settings()
         self.frozen = False
         self.name = None
         self.mat_in = mat_in or 0
@@ -629,6 +631,7 @@ class TrigBoundaryDisplayController(qtw.QWidget):
 
         # build the UI elements
         main_layout = qtw.QGridLayout()
+        main_layout.setContentsMargins(11, 11, 0, 11)
         self.setLayout(main_layout)
 
         # visibility check box
@@ -724,6 +727,7 @@ class ClipConstraint(qtw.QWidget):
         self.settings = settings
         self.settings.establish_defaults(clip_constraint_min=min, clip_constraint_max=max)
         layout = qtw.QHBoxLayout()
+        layout.setContentsMargins(11, 11, 0, 11)
         layout.addWidget(cw.SettingsRangeBox(
             self.settings, "Clip Constraint Range", "clip_constraint_min", "clip_constraint_max", float,
             validator=qtg.QDoubleValidator(-1e6, 1e6, 9)
@@ -751,6 +755,7 @@ class SpacingConstraint(qtw.QWidget):
             raise ValueError(f"FixedMinDistanceConstraint: mode must be 'min' or 'max'.")
         self.settings.establish_defaults(distance_constraint=min)
         layout = qtw.QHBoxLayout()
+        layout.setContentsMargins(11, 11, 0, 11)
         layout.addWidget(cw.SettingsEntryBox(
             self.settings, "distance_constraint", float, validator=qtg.QDoubleValidator(-1e6, 1e6, 9)
         ))
