@@ -1,4 +1,5 @@
 from pathlib import Path
+import math
 
 import numpy as np
 import tensorflow as tf
@@ -153,11 +154,13 @@ class Source3D:
         self.wavelengths = tf.zeros((0, 3), dtype=tf.float64)
         self.rays = tf.zeros((0, 7), dtype=tf.float64)
 
-    def update(self, raycount_factor=1):
+    def update(self, ray_count_factor=None):
+        if ray_count_factor is None:
+            ray_count = self.settings.ray_count
+        else:
+            ray_count = math.floor(self.settings.ray_count * ray_count_factor)
         if self.settings.source_active:
-            self.start_seed, self.end_seed, self.wavelength_seed = self.get_seeds(
-                int(self.settings.ray_count * raycount_factor)
-            )
+            self.start_seed, self.end_seed, self.wavelength_seed = self.get_seeds(ray_count)
             base_start_points = self.make_start_points(self.start_seed)
             base_end_points = self.make_end_points(self.end_seed)
             if base_end_points.shape[1] == 2:

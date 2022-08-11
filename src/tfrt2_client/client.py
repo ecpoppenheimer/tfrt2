@@ -27,7 +27,7 @@ import tfrt2.component_widgets as component_widgets
 import tfrt2.wavelength as wavelength
 import tfrt2.optics as optics
 import tfrt2.client_TCP_widget as tcp_widget
-from tfrt2.optimization_controls import OptimizationPane
+from tfrt2.remote_controls import RemotePane
 
 
 class OpticClientWindow(qtw.QWidget):
@@ -69,7 +69,7 @@ class OpticClientWindow(qtw.QWidget):
         self.trace_pane = TraceControls(self)
         self.parameters_pane = ParameterControls(self)
         self.components_pane = ComponentControls(self)
-        self.optimize_pane = OptimizationPane(self)
+        self.remote_pane = RemotePane(self)
         self.ui.pane_stack = None
         self._quit = threading.Event()
         self.ui.retrace_button = qtw.QPushButton("Re-trace")
@@ -95,7 +95,7 @@ class OpticClientWindow(qtw.QWidget):
         self.build_ui([
             ("Display Settings", self.display_pane),
             ("Components", self.components_pane),
-            ("Remote Operations", self.optimize_pane),
+            ("Remote Operations", self.remote_pane),
             ("Tracing Controls", self.trace_pane),
             ("Parameters", self.parameters_pane),
         ])
@@ -268,7 +268,7 @@ class OpticClientWindow(qtw.QWidget):
         # Update the control panes with the new system
         self.populate_panes_from_system(self.optical_system)
         self.tcp_widget.check_system_state()
-        self.optimize_pane.try_activate()
+        self.remote_pane.try_activate()
 
     def populate_panes_from_system(self, system):
         self.display_pane.update_with_system(system)

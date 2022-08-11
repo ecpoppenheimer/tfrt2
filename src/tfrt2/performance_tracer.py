@@ -1,4 +1,3 @@
-import multiprocessing
 import threading
 import os
 import itertools
@@ -23,7 +22,7 @@ class PerformanceTracer:
     """
     This class performs high-performance ray tracing operations.
 
-    This class attaches to a tracing_TCP_Server, and manages the various threads and processes needed to run the
+    This class attaches to a tracing_TCP_Server, and manages the various threads needed to run the
     time-consuming operations in an efficient and non-blocking manner.  It attempts to provide an interface to the
     tracing_TCP_server that is as clean and self-contained as possible.
 
@@ -54,6 +53,7 @@ class PerformanceTracer:
 
     """
     def __init__(self, server, optical_system, device_count, profiler_log_path=None):
+        # TODO maybe remove the profiling option
         self.optical_system = optical_system
         self.server = server
 
@@ -77,27 +77,27 @@ class PerformanceTracer:
 
         # An event that will be used to determine whether the engine is busy, which will block access to the optical
         # system and prevent synchronization requests.
-        self.busy = multiprocessing.Event()
+        self.busy = threading.Event()
         self.BUSY_TIMEOUT = .25
         self.busy.clear()
 
         # A signal to end processing loops, to help gracefully shut down.  Though I admit I have no idea
         # if this actually does anything.
-        self._shutdown = multiprocessing.Event()
+        self._shutdown = threading.Event()
         self._shutdown.clear()
 
         # A signal to abort processing operations.
-        self.abort = multiprocessing.Event()
+        self.abort = threading.Event()
         self.abort.clear()
 
         # Create a job queue to feed job requests to the engine management loop.  Any thread can add items to this
         # queue, and it should not block.
-        self.job_queue = multiprocessing.Queue()
+        self.job_queue = queue.Queue()
 
         # Create two private queues, for communicating with the worker processes
         self.worker_count = len(self.devices)
-        self._sub_job_queue = multiprocessing.Queue(2 * self.worker_count)
-        self._result_queue = multiprocessing.Queue()
+        self._sub_job_queue = queue.Queue(2 * self.worker_count)
+        self._result_queue = queue.Queue()
 
         # Create a pyqt signal that will be fired whenever a job is ready.  I am pretty sure the engine manager thread
         # should be able to fire this without issue - it is a thread, not a process.
@@ -108,17 +108,17 @@ class PerformanceTracer:
         self._engine_manager_thread = threading.Thread(target=self._engine_management_loop, daemon=True)
         self._engine_manager_thread.start()
 
-        # Create worker processes for each device
+        # Create worker threads for each device
         self.workers = []
         self.worker_processes = []
         for device in self.devices:
             worker = Worker(
-                device, self._sub_job_queue, self._result_queue, self.abort, self._shutdown, profiler_log_path
+                device, self._sub_job_queue, self._result_queue, self.abort, self._shutdown
             )
-            process = multiprocessing.Process(target=worker.run, daemon=True)
+            thread = threading.Thread(target=worker.run, daemon=True)
             self.workers.append(worker)
-            self.worker_processes.append(process)
-            process.start()
+            self.worker_processes.append(thread)
+            thread.start()
 
     def try_wait(self):
         """
@@ -177,13 +177,13 @@ class PerformanceTracer:
 
     def queue_job(self, job_type, *args):
         if job_type in self.recognized_jobs.keys():
-            if len(args) > 0:
-                self.job_queue.put((job_type, *args))
+            if len(args) >= 1:
+                self.job_queue.put((job_type, args))
             else:
                 self.job_queue.put((job_type, tuple()))
 
     def _illuminance_plot(
-        self, ray_count, standalone_plot, x_res=None, y_res=None, x_min=None, x_max=None, y_min=None, y_max=None
+        self, ray_count, ray_count_factor, x_res, y_res, x_min, x_max, y_min, y_max, standalone_plot
     ):
         """
         Trace many rays to generate an illuminance plot of the output.  This function is designed to be able to be
@@ -202,19 +202,34 @@ class PerformanceTracer:
             The minumum number of rays to trace when forming this illuminance plot.  This is a minimum to allow the
             ray count used in each cycle to vary dynamically, and because I don't see the need to break the cycles up
             so that they add up to a precise value.  We are making a histogram.  More data is better.
-        standalone_plot : bool
-            If True, will use the x and y parameters to define the histogram, and will send this histogram to the
-            client.  If False, will ignore the x and y parameters and use the system goal to histogram the data.
+        ray_count_factor : float
+            A factor used to scale the rays generated by the sources, to increase batch size and reduce batch number.
+            More performant if as high as possible without causing OOM errors.
         x_res, y_res : int, optional
             The resolution of the histogram to make.  Ignored if standalone_plot is False, required if True.
         x_min, x_max, y_min, y_max : int, optional
             The limits in which the histogram is evaluated.  Values outside these limits will be clipped to fit within
             them.
+        standalone_plot : bool
+            If True, will use the x and y parameters to define the histogram, and will send this histogram to the
+            client.  If False, will ignore the x and y parameters and use the system goal to histogram the data.
         """
         # Update the optical system, and capture its boundary data.  This can be re-used for every iteration.
         with tf.device(self.cpu_device):
-            self.optical_system.update()
-            boundary_data = tuple(each.numpy() for each in self.optical_system.fuse_boundaries())
+            self.optical_system.update(update_sources=False)
+            boundary_data = self.optical_system.fuse_boundaries()
+
+            # This data will not change run to run, so it can be sent to the workers now
+            for i in range(len(self.workers)):
+                self.workers[i].prep_data(
+                    boundary_data=boundary_data,
+                    trace_depth=tf.constant(self.server.settings.trace_depth, dtype=tf.int32),
+                    intersect_epsilon=self.optical_system.intersect_epsilon,
+                    size_epsilon=self.optical_system.size_epsilon,
+                    ray_start_epsilon=self.optical_system.ray_start_epsilon,
+                    new_ray_length=self.optical_system.new_ray_length,
+                    rayset_size=self.optical_system.rayset_size
+                )
 
         init = True
         traced_rays = 0
@@ -228,8 +243,8 @@ class PerformanceTracer:
             # save them for later if we cannot put them
             if cached_source_rays is None:
                 with tf.device(self.cpu_device):
-                    source_rays = self.optical_system.get_ray_sample(1)
-                    source_rays = self.optical_system.evaluate_n(source_rays).numpy()
+                    source_rays = self.optical_system.get_ray_sample(ray_count_factor)
+                    source_rays = self.optical_system.evaluate_n(source_rays)
                     if source_rays.shape[0] == 0:
                         self.nonfatal_error("illuminance_plot, but there are no sources, or they are all disabled.")
                         return
@@ -239,18 +254,8 @@ class PerformanceTracer:
                 cached_source_rays = None
 
             try:
-                self._sub_job_queue.put(
-                    (
-                        "fast",
-                        (
-                            source_rays, *boundary_data, self.server.settings.trace_depth,
-                            self.optical_system.intersect_epsilon.numpy(), self.optical_system.size_epsilon.numpy(),
-                            self.optical_system.ray_start_epsilon.numpy(), self.optical_system.new_ray_length.numpy(),
-                            self.optical_system.rayset_size
-                         )
-                    ),
-                    False
-                )
+                self._sub_job_queue.put(("fast", (source_rays,)), False)
+                print(f"just queued {source_rays.shape[0]} rays for tracing")
                 pending_results += 1
                 traced_rays += source_rays.shape[0]
             except queue.Full:
@@ -317,7 +322,11 @@ class PerformanceTracer:
             if flat_result is not None:
                 self.server.send_data(tcp.SERVER_FLATTENER, pickle.dumps(flat_result))
 
-    def _full_ray_trace(self):
+        # Clear the data that was prepped in the workers
+        for worker in self.workers:
+            worker.prepped_data = {}
+
+    def _full_ray_trace(self, ray_count_factor):
         """
         Perform a full ray_trace and return all ray sets.
 
@@ -327,7 +336,7 @@ class PerformanceTracer:
         the extra power.
         """
         try:
-            self.optical_system.update()
+            self.optical_system.update(ray_count_factor)
             self.optical_system.ray_trace(self.server.settings.trace_depth)
             all_raysets = self.optical_system.get_raysets(numpy=True)
             self.server.send_data(tcp.SERVER_TRACE_RSLT, pickle.dumps(all_raysets))
@@ -336,18 +345,21 @@ class PerformanceTracer:
 
 
 class Worker:
-    def __init__(self, device, job_queue, result_queue, abort, shutdown, prof_log_path=None):
+    def __init__(self, device, job_queue, result_queue, abort, shutdown):
         self.device = device
         self.job_queue = job_queue
         self.abort = abort
         self.shutdown = shutdown
         self.result_queue = result_queue
-        self.prof_log_path = str(prof_log_path)
         self.last_time = time.time()
+        self.prepped_data = {}
 
         self.job_LUT = {
             "fast": self._fast
         }
+
+    def prep_data(self, **kwargs):
+        self.prepped_data = kwargs
 
     def run(self):
         try:
@@ -358,11 +370,7 @@ class Worker:
                 # Always need to put something in the result queue every time something is removed from the job_queue,
                 # even in the case of an error, to make sure things don't get out of sync.
                 try:
-                    if self.prof_log_path is None:
-                        self.result_queue.put(self.job_LUT[job](*args), True)
-                    else:
-                        with tf.profiler.experimental.Profile(self.prof_log_path):
-                            self.result_queue.put(self.job_LUT[job](*args), True)
+                    self.result_queue.put(self.job_LUT[job](*args), True)
                 except Exception:
                     self.result_queue.put(SubJobError(traceback.format_exc()), True)
                 self.last_time = time.time()
@@ -372,21 +380,16 @@ class Worker:
             # way, that also catches other termination methods...
             return
 
-    def _fast(
-        self, source_rays, boundary_points, boundary_norms, metadata, trace_depth, intersect_epsilon, size_epsilon,
-        ray_start_epsilon, new_ray_length, rayset_size
-    ):
+    def _fast(self, source_rays):
         with tf.device(self.device):
             t1 = time.time()
-            source_rays = tf.convert_to_tensor(source_rays, dtype=tf.float64)
-            boundary_points = tf.convert_to_tensor(boundary_points, dtype=tf.float64)
-            boundary_norms = tf.convert_to_tensor(boundary_norms, dtype=tf.float64)
-            metadata = tf.convert_to_tensor(metadata, dtype=tf.int32)
-            trace_depth = tf.convert_to_tensor(trace_depth, dtype=tf.int32)
-            intersect_epsilon = tf.convert_to_tensor(intersect_epsilon, dtype=tf.float64)
-            size_epsilon = tf.convert_to_tensor(size_epsilon, dtype=tf.float64)
-            ray_start_epsilon = tf.convert_to_tensor(ray_start_epsilon, dtype=tf.float64)
-            new_ray_length = tf.convert_to_tensor(new_ray_length, dtype=tf.float64)
+            boundary_points, boundary_norms, metadata = self.prepped_data["boundary_data"]
+            trace_depth = self.prepped_data["trace_depth"]
+            intersect_epsilon = self.prepped_data["intersect_epsilon"]
+            size_epsilon = self.prepped_data["size_epsilon"]
+            ray_start_epsilon = self.prepped_data["ray_start_epsilon"]
+            new_ray_length = self.prepped_data["new_ray_length"]
+            rayset_size = self.prepped_data["rayset_size"]
 
             t2 = time.time()
             output = engine.fast_trace_loop(

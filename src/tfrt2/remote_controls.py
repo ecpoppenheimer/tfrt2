@@ -8,7 +8,7 @@ import tfrt2.component_widgets as cw
 import tfrt2.tcp_base as tcp
 
 
-class OptimizationPane(qtw.QWidget):
+class RemotePane(qtw.QWidget):
     def __init__(self, parent):
         super().__init__()
 
@@ -19,7 +19,7 @@ class OptimizationPane(qtw.QWidget):
         # Build the base UI
         base_layout = qtw.QVBoxLayout()
 
-        self.error_widget = qtw.QLabel("Connect to a trace server to activate optimization\n and analysis controls.")
+        self.error_widget = qtw.QLabel("Connect to a trace server to activate remote controls.")
         base_layout.addWidget(self.error_widget)
         self.active_widget = qtw.QWidget()
         self.active_widget.hide()
@@ -31,19 +31,40 @@ class OptimizationPane(qtw.QWidget):
         # Build the controls in the active widget
         main_layout = qtw.QGridLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setColumnMinimumWidth(0, 11)
+        main_layout.setColumnStretch(0, 0)
         self.ui_row = 0
         self.active_widget.setLayout(main_layout)
 
+        # Remote raytrace
+        illuminance_label = qtw.QLabel(
+            "Perform a remote ray trace.  Scales rays from each source by ray count factor.  Ray count factor is also "
+            "used by remote tracing operations to scale the batch size.  This should be as high as possible without "
+            "causing out of memory errors."
+        )
+        illuminance_label.setWordWrap(True)
+        main_layout.addWidget(illuminance_label, self.ui_row, 0, 1, 7)
+        self.ui_row += 1
+
+        self.parent_client.settings.establish_defaults(ray_count_factor=1.0)
+        self.remote_raytrace_button = qtw.QPushButton("Remote Raytrace")
+        self.remote_raytrace_button.clicked.connect(self.remote_raytrace)
+        main_layout.addWidget(self.remote_raytrace_button, self.ui_row, 1, 1, 3)
+
+        main_layout.addWidget(cw.SettingsEntryBox(
+            self.parent_client.settings, "ray_count_factor", float, qtg.QDoubleValidator(1e-4, 1e6, 6)
+        ), self.ui_row, 4, 1, 3)
+        self.ui_row += 1
+
         # Controls for tracing to make the illuminance plot (also defines the goal flatten icdf)
-        label = qtw.QLabel(
+        illuminance_label = qtw.QLabel(
             "Trace the system to produce an illuminance plot.  This will also feed the goal's flattener.  These "
             "settings can over-ride the settings on the components page / goal, but will only override for this "
             "operation, not subsequent automatic goal flattener updates done during optimization."
         )
-        label.setWordWrap(True)
-        main_layout.addWidget(label, self.ui_row, 0, 1, 7)
-        main_layout.setColumnMinimumWidth(0, 11)
-        main_layout.setColumnStretch(0, 0)
+        illuminance_label.setWordWrap(True)
+        main_layout.addWidget(illuminance_label, self.ui_row, 0, 1, 7)
+
         self.ui_row += 1
         self.illuminance_button = qtw.QPushButton("Calculate Illuminance")
         self.illuminance_button.clicked.connect(self.request_illuminance_plot)
@@ -89,12 +110,6 @@ class OptimizationPane(qtw.QWidget):
         main_layout.addWidget(self.rq_illum_pull_lims_button, self.ui_row, 5, 2, 2)
         self.ui_row += 2
 
-        # Button to do a remote raytrace
-        self.remote_raytrace_button = qtw.QPushButton("Perform a remote raytrace")
-        self.remote_raytrace_button.clicked.connect(self.remote_raytrace)
-        main_layout.addWidget(self.remote_raytrace_button, self.ui_row, 0, 1, 7)
-        self.ui_row += 1
-
     def try_activate(self, socket=None):
         if socket is not None:
             self.server_socket = socket
@@ -132,13 +147,13 @@ class OptimizationPane(qtw.QWidget):
         if self._active:
             if self.parent_client.settings.rq_illum_override:
                 ilum_settings = (
-                    self.parent_client.settings.rq_illum_ray_count, self.parent_client.settings.rq_illum_x_res,
-                    self.parent_client.settings.rq_illum_y_res, self.parent_client.settings.rq_illum_x_min,
-                    self.parent_client.settings.rq_illum_x_max, self.parent_client.settings.rq_illum_y_min,
-                    self.parent_client.settings.rq_illum_y_max
+                    self.parent_client.settings.rq_illum_ray_count, self.parent_client.settings.ray_count_factor,
+                    self.parent_client.settings.rq_illum_x_res, self.parent_client.settings.rq_illum_y_res,
+                    self.parent_client.settings.rq_illum_x_min, self.parent_client.settings.rq_illum_x_max,
+                    self.parent_client.settings.rq_illum_y_min, self.parent_client.settings.rq_illum_y_max
                 )
             else:
-                ilum_settings = None
+                ilum_settings = (self.parent_client.settings.ray_count_factor,)
             self.server_socket.write(tcp.CLIENT_RQST_ILUM, pickle.dumps(ilum_settings))
 
     def receive_illuminance(self, data):
@@ -161,7 +176,7 @@ class OptimizationPane(qtw.QWidget):
 
     def remote_raytrace(self):
         self.parent_client.trace_pane.clear_rays()
-        self.server_socket.write(tcp.CLIENT_RQST_TRACE)
+        self.server_socket.write(tcp.CLIENT_RQST_TRACE, pickle.dumps(self.parent_client.settings.ray_count_factor))
 
     def receive_ray_trace_results(self, data):
         self.parent_client.optical_system.feed_raysets(pickle.loads(data))

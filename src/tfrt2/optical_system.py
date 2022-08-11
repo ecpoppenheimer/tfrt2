@@ -116,10 +116,13 @@ class OpticalSystem(TraceEngine3D):
         self.goal = goal
         self.parts["goal"] = goal
 
-    def update(self):
-        for part in self.parts.values():
+    def update(self, ray_count_factor=None, update_sources=True):
+        for part in self.opticals + self.stops + self.targets:
             part.update()
-        self.refresh_source_rays()
+        if update_sources:
+            for s in self.sources:
+                s.update(ray_count_factor)
+            self.refresh_source_rays()
 
     def update_optics(self):
         for part in self.opticals:

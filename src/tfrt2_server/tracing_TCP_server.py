@@ -21,7 +21,7 @@ import PyQt5.QtWidgets as qtw
 import PyQt5.QtCore as qtc
 
 import tfrt2.tcp_base as tcp
-import tfrt2.settings as settings
+from tfrt2.settings import Settings
 from tfrt2.performance_tracer import PerformanceTracer
 
 
@@ -36,7 +36,7 @@ class TraceServer(qtn.QTcpServer):
         self.listen(port=port)
         self.newConnection.connect(self.got_connection)
         self.client_socket = None
-        self.settings = settings.Settings(system_path=str(self.temp_path))
+        self.settings = Settings(system_path=str(self.temp_path))
         self.cached_component_settings = None
         self.cached_parameters = None
         self.received_files = {}
@@ -143,7 +143,7 @@ class TraceServer(qtn.QTcpServer):
                         component_settings[k] = str(self.ftp_to_path(v.replace("$PATH$", "")))
 
             # Save the settings into a file.  They will be applied once refresh_system is called
-            settings.Settings(**data).save(str(self.temp_path / "settings.data"))
+            Settings(**data).save(str(self.temp_path / "settings.data"))
 
             self.client_socket.write(tcp.SERVER_S_SET_ACK, tcp.TRUE)
         except Exception:
@@ -290,8 +290,8 @@ class TraceServer(qtn.QTcpServer):
                 TraceServer._empty_folder(f)
                 f.rmdir()
 
-    def ray_trace_for_client(self, _):
-        self.engine.queue_job("full_ray_trace")
+    def ray_trace_for_client(self, data):
+        self.engine.queue_job("full_ray_trace", pickle.loads(data))
 
     def receive_parameters(self, data):
         if self.engine.try_wait():
@@ -312,21 +312,20 @@ class TraceServer(qtn.QTcpServer):
 
     def measure_illuminance(self, data):
         settings = pickle.loads(data)
-        try:
-            ray_count, x_res, y_res, x_min, x_max, y_min, y_max = settings
-            standalone_plot = False
-        except TypeError:
-            ray_count = self.optical_system.settings.goal.flattener_ray_requirement
-            x_res = self.optical_system.settings.goal.f_c1_res
-            y_res = self.optical_system.settings.goal.f_c2_res
-            x_min = self.optical_system.settings.goal.c1_min
-            x_max = self.optical_system.settings.goal.c1_max
-            y_min = self.optical_system.settings.goal.c2_min
-            y_max = self.optical_system.settings.goal.c2_max
+        # Settings will either have 8 elements (for an override) or just one, the ray_count_factor
+        if len(settings) == 1:
+            settings = (
+                self.optical_system.settings.goal.flattener_ray_requirement,
+                settings[0],
+                *(None,) * 6,
+                False
+            )
+        else:
+            settings = (*settings, True)
 
         self.engine.queue_job(
             "illuminance_plot",
-            (ray_count, True, x_res, y_res, x_min, x_max, y_min, y_max)
+            *settings
         )
 
     def reset_system(self, _):

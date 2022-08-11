@@ -67,11 +67,11 @@ class ClientTCPWidget(qtw.QWidget):
             tcp.SERVER_S_SET_ACK: self.server_ack_sys_settings,
             tcp.SERVER_FTP_ACK: self.server_ftp_ack,
             tcp.SERVER_SYS_L_ACK: self.server_system_load_ack,
-            tcp.SERVER_TRACE_RSLT: self.client.optimize_pane.receive_ray_trace_results,
+            tcp.SERVER_TRACE_RSLT: self.client.remote_pane.receive_ray_trace_results,
             tcp.SERVER_PARAMS: self.receive_parameters,
             tcp.SERVER_PARAM_ACK: self.server_params_ack,
             tcp.SERVER_MESSAGE: self.print_server_message,
-            tcp.SERVER_ILUM: self.client.optimize_pane.receive_illuminance,
+            tcp.SERVER_ILUM: self.client.remote_pane.receive_illuminance,
             tcp.SERVER_SYS_RST_ACK: self.server_ack_sys_reset,
             tcp.SERVER_READY: self.receive_server_ready,
             tcp.SERVER_BUSY: self.receive_server_busy,
@@ -204,7 +204,7 @@ class ClientTCPWidget(qtw.QWidget):
 
     def disconnected(self):
         self.close_connection(self.DISCONNECTED_REMOTE)
-        self.client.optimize_pane.deactivate()
+        self.client.remote_pane.deactivate()
         self.set_processing_state(self.UNKNOWN)
 
     def got_validation(self, success):
@@ -212,12 +212,12 @@ class ClientTCPWidget(qtw.QWidget):
             self.set_connection_state(self.CONNECTED)
             self.server_validated = True
             self.sync_controls.show()
-            self.client.optimize_pane.try_activate(self.server_socket)
+            self.client.remote_pane.try_activate(self.server_socket)
         else:
             self.set_connection_state(self.VALIDATION_FAIL)
             self.server_validated = False
             self.sync_controls.hide()
-            self.client.optimize_pane.deactivate()
+            self.client.remote_pane.deactivate()
 
     def socket_error(self, error):
         print(f"received socket error: {error}")
@@ -240,7 +240,7 @@ class ClientTCPWidget(qtw.QWidget):
             self.message_LUT[header](data)
         except KeyError:
             try:
-                self.client.optimize_pane.message_LUT[header](data)
+                self.client.remote_pane.message_LUT[header](data)
             except KeyError:
                 print(
                     "Got a message from server that could not be accepted by either the TCP widget nor the "
