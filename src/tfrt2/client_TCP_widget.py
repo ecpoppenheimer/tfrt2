@@ -1,3 +1,9 @@
+"""
+Whenever adding a new kind of file that has to be FTP'd, need to add the settings key to
+ClientTCPWidget.keys_that_require_ftp (make sure the key has path in its name).  And then need to edit
+tracing_TCP_server.reload_file to accept this kind of file.
+"""
+
 from pathlib import Path
 import pickle
 import traceback
@@ -38,7 +44,7 @@ class ClientTCPWidget(qtw.QWidget):
         "norm_arrow_length", "parameter_arrow_visibility", "parameter_arrow_length", "opacity", "show_spectrum",
         "vum_visible"
     }
-    keys_that_require_ftp = {"mesh_input_path", "spectrum_path"}
+    keys_that_require_ftp = {"mesh_input_path", "spectrum_path", "goal_image_path"}
 
     def __init__(self, client):
         super().__init__()

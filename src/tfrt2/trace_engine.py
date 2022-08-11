@@ -611,6 +611,7 @@ def fast_trace_loop(
     source_rays, boundary_points, boundary_norms, metadata, trace_depth, intersect_epsilon, size_epsilon,
     ray_start_epsilon, new_ray_length, rayset_size
 ):
+    print("******tracing fast trace loop******")
     finished_rays = tf.zeros((0, rayset_size), dtype=tf.float64)
     counter = tf.constant(0, dtype=tf.int32)
     (
@@ -652,6 +653,7 @@ def _fast_while_body(
         finished_rays, working_rays, boundary_points_const, boundary_norms_const, metadata_const,
         counter, trace_depth, intersect_epsilon, size_epsilon, ray_start_epsilon, new_ray_length
 ):
+    print("******tracing fast while body******")
     counter += 1
     # Outputs generated here are rectangular, because we are computing intersections between every ray
     # with every boundary.  First dimension indexes rays, second dimension indexes boundaries.

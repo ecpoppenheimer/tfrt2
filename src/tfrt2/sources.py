@@ -2,12 +2,12 @@ from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
-import tfquaternion as tfq
 import PyQt5.QtGui as qtg
 import PyQt5.QtWidgets as qtw
 
 import tfrt2.component_widgets as cw
 import tfrt2.wavelength as wv
+from tfrt2 import tfquaternion as tfq
 
 
 class Source3D:

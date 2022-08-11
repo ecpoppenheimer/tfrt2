@@ -158,7 +158,7 @@ class CPlaneGoal:
         self.settings = system_settings.goal
         self.settings.establish_defaults(
             c1=c1[0], c1_min=c1[1], c1_max=c1[2], c2=c2[0], c2_min=c2[1], c2_max=c2[2], visible=True,
-            c3_offset=c3_offset, f_c1_res=64, f_c2_res=64, goal_color="#FFFFFF", flattener_ray_requirement=int(1e6)
+            c3_offset=c3_offset, f_c1_res=64, f_c2_res=64, goal_color="#FFFFFF", flattener_ray_requirement=int(1e4)
         )
         self.auto_target = auto_target
         self.auto_far_edge_distance = auto_far_edge_distance
@@ -197,7 +197,7 @@ class CPlaneGoal:
                 # Make this a cdf that is loaded from an image
                 self._loadable_cdf = True
                 self.settings.establish_defaults(
-                    goal_image=goal_cdf, goal_image_flip_x=False, goal_image_flip_y=False, goal_twist=False,
+                    goal_image_path=goal_cdf, goal_image_flip_x=False, goal_image_flip_y=False, goal_twist=False,
                     goal_test_point_count=0
                 )
                 self.goal_cdf = cdf.CumulativeDistributionFunction2D(
@@ -317,7 +317,7 @@ class CPlaneGoal:
             main_layout.addWidget(qtw.QLabel("Path to the image to use as goal density"), self.ui_row, 0, 1, 6)
             self.ui_row += 1
             self.goal_image_file_selector = cw.SettingsFileBox(
-                self.settings, "goal_image", self.driver.settings.system_path, mode="load",
+                self.settings, "goal_image_path", self.driver.settings.system_path, mode="load",
                 callback=self.load_goal_image
             )
             main_layout.addWidget(self.goal_image_file_selector, self.ui_row, 0, 1, 6)
@@ -569,9 +569,9 @@ class CPlaneGoal:
     def load_goal_image(self, *args, init=False):
         # Need the *args to eat a parameter passed by the pyqt signal that calls this function whenever one of the
         # UI controls is used.
-        if self._loadable_cdf and self.settings.goal_image != "":
+        if self._loadable_cdf and self.settings.goal_image_path != "":
             try:
-                image = Image.open(self.settings.goal_image)
+                image = Image.open(self.settings.goal_image_path)
                 self.goal_density = np.array(ImageOps.grayscale(image))
                 if self.settings.goal_image_flip_x:
                     self.goal_density = np.flip(self.goal_density, 0)
@@ -617,7 +617,7 @@ class CPlaneGoal:
             pass
 
         if (
-            self._loadable_cdf and self.settings.goal_image != "" and self.expand is not None and
+            self._loadable_cdf and self.settings.goal_image_path != "" and self.expand is not None and
             self.goal_cdf is not None
         ):
             if self.settings.goal_test_point_count > 0:

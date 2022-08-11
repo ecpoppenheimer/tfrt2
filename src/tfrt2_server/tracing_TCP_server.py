@@ -67,10 +67,8 @@ class TraceServer(qtn.QTcpServer):
         # Make a performance tracer, which will organize the process of doing various high-throughput computing
         # tasks on the optical system.
         if self.do_profile:
-            print("building engine with profiling enabled")
             self.engine = PerformanceTracer(self, None, args.device_count, self.prof_log_path)
         else:
-            print("building engine without profiling enabled")
             self.engine = PerformanceTracer(self, None, args.device_count)
 
     def got_connection(self):
@@ -262,6 +260,9 @@ class TraceServer(qtn.QTcpServer):
                     pass
             elif file_type == "mesh_input":
                 component.load(full_path)
+            elif file_type == "goal_image":
+                component.settings.goal_image_path = str(full_path)
+                component.load_goal_image()
             else:
                 raise ValueError(f"Tracing_TCP_Server.reload_file: unknown file_type {file_type} was specified.")
 

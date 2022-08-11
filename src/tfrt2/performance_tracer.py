@@ -343,7 +343,7 @@ class Worker:
         self.shutdown = shutdown
         self.result_queue = result_queue
         self.prof_log_path = str(prof_log_path)
-        print(f"made a worker with prof log path {prof_log_path}")
+        self.last_time = time.time()
 
         self.job_LUT = {
             "fast": self._fast
@@ -353,18 +353,20 @@ class Worker:
         try:
             while not self.shutdown.is_set():
                 job, args = self.job_queue.get(True)
+                t = time.time()
+                print(f"worker is starting a job {t - self.last_time} s after ending last one")
                 # Always need to put something in the result queue every time something is removed from the job_queue,
                 # even in the case of an error, to make sure things don't get out of sync.
                 try:
                     if self.prof_log_path is None:
-                        print("not profiling")
                         self.result_queue.put(self.job_LUT[job](*args), True)
                     else:
-                        print("doing profiling")
                         with tf.profiler.experimental.Profile(self.prof_log_path):
                             self.result_queue.put(self.job_LUT[job](*args), True)
                 except Exception:
                     self.result_queue.put(SubJobError(traceback.format_exc()), True)
+                self.last_time = time.time()
+                print(f"worker just finished its job in {self.last_time-t} s")
         except KeyboardInterrupt:
             # Basically just to hide the error messages when it gets keyboard interrupt.  But there has to be a better
             # way, that also catches other termination methods...
@@ -375,6 +377,7 @@ class Worker:
         ray_start_epsilon, new_ray_length, rayset_size
     ):
         with tf.device(self.device):
+            t1 = time.time()
             source_rays = tf.convert_to_tensor(source_rays, dtype=tf.float64)
             boundary_points = tf.convert_to_tensor(boundary_points, dtype=tf.float64)
             boundary_norms = tf.convert_to_tensor(boundary_norms, dtype=tf.float64)
@@ -385,10 +388,12 @@ class Worker:
             ray_start_epsilon = tf.convert_to_tensor(ray_start_epsilon, dtype=tf.float64)
             new_ray_length = tf.convert_to_tensor(new_ray_length, dtype=tf.float64)
 
+            t2 = time.time()
             output = engine.fast_trace_loop(
                 source_rays, boundary_points, boundary_norms, metadata, trace_depth, intersect_epsilon, size_epsilon,
                 ray_start_epsilon, new_ray_length, rayset_size
             )
+            print(f"   worker spent {t2-t1}s prepping data and {time.time() - t2}s running the loop")
             return output[:, 3:6].numpy()
 
 
