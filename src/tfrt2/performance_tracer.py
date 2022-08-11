@@ -53,7 +53,7 @@ class PerformanceTracer:
     have to use a pyqt signal: the server's send_message signal.
 
     """
-    def __init__(self, server, optical_system, device_count):
+    def __init__(self, server, optical_system, device_count, profiler_log_path=None):
         self.optical_system = optical_system
         self.server = server
 
@@ -112,7 +112,9 @@ class PerformanceTracer:
         self.workers = []
         self.worker_processes = []
         for device in self.devices:
-            worker = Worker(device, self._sub_job_queue, self._result_queue, self.abort, self._shutdown)
+            worker = Worker(
+                device, self._sub_job_queue, self._result_queue, self.abort, self._shutdown, profiler_log_path
+            )
             process = multiprocessing.Process(target=worker.run, daemon=True)
             self.workers.append(worker)
             self.worker_processes.append(process)
@@ -334,12 +336,14 @@ class PerformanceTracer:
 
 
 class Worker:
-    def __init__(self, device, job_queue, result_queue, abort, shutdown):
+    def __init__(self, device, job_queue, result_queue, abort, shutdown, prof_log_path=None):
         self.device = device
         self.job_queue = job_queue
         self.abort = abort
         self.shutdown = shutdown
         self.result_queue = result_queue
+        self.prof_log_path = str(prof_log_path)
+        print(f"made a worker with prof log path {prof_log_path}")
 
         self.job_LUT = {
             "fast": self._fast
@@ -352,7 +356,13 @@ class Worker:
                 # Always need to put something in the result queue every time something is removed from the job_queue,
                 # even in the case of an error, to make sure things don't get out of sync.
                 try:
-                    self.result_queue.put(self.job_LUT[job](*args), True)
+                    if self.prof_log_path is None:
+                        print("not profiling")
+                        self.result_queue.put(self.job_LUT[job](*args), True)
+                    else:
+                        print("doing profiling")
+                        with tf.profiler.experimental.Profile(self.prof_log_path):
+                            self.result_queue.put(self.job_LUT[job](*args), True)
                 except Exception:
                     self.result_queue.put(SubJobError(traceback.format_exc()), True)
         except KeyboardInterrupt:

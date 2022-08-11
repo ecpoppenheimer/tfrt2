@@ -28,6 +28,7 @@ from tfrt2.performance_tracer import PerformanceTracer
 class TraceServer(qtn.QTcpServer):
     driver_type = "server"
     temp_path = Path(__file__).parent.resolve() / "server_temp"
+    prof_log_path = Path(__file__).parent.resolve() / "profile"
 
     def __init__(self, port, args):
         super().__init__()
@@ -43,8 +44,13 @@ class TraceServer(qtn.QTcpServer):
         self.busy_signal.sig.connect(self.send_busy_signal)
         self._send_data = DataSignal()
         self._send_data.sig.connect(self._send_data_callback)
+        self.do_profile = args.profile
 
         self.clean_temp()
+        # Clean out the profile folder
+        if not self.prof_log_path.exists():
+            self.prof_log_path.mkdir(exist_ok=True)
+        self._empty_folder(self.prof_log_path)
 
         self.message_LUT = {
             tcp.CLIENT_MAIN_SET: self.set_main_settings,
@@ -60,7 +66,12 @@ class TraceServer(qtn.QTcpServer):
 
         # Make a performance tracer, which will organize the process of doing various high-throughput computing
         # tasks on the optical system.
-        self.engine = PerformanceTracer(self, None, args.device_count)
+        if self.do_profile:
+            print("building engine with profiling enabled")
+            self.engine = PerformanceTracer(self, None, args.device_count, self.prof_log_path)
+        else:
+            print("building engine without profiling enabled")
+            self.engine = PerformanceTracer(self, None, args.device_count)
 
     def got_connection(self):
         client_socket = tcp.TcpDataPacker(
@@ -259,25 +270,24 @@ class TraceServer(qtn.QTcpServer):
             self.send_nonfatal_error("reloading file")
 
     def clean_temp(self):
-        # Make sure the temp folder exists
+        # Make sure the folder exists
         if not self.temp_path.exists():
             self.temp_path.mkdir(exist_ok=True)
+        self._empty_folder(self.temp_path)
 
-        # Empty it
-        for f in self.temp_path.iterdir():
+        self.received_files.clear()
+
+    @staticmethod
+    def _empty_folder(path):
+        for f in path.iterdir():
             if f.is_file():
                 try:
                     f.unlink()
                 except PermissionError:
                     pass
             else:
-                for g in f.iterdir():
-                    try:
-                        g.unlink()
-                    except PermissionError:
-                        pass
+                TraceServer._empty_folder(f)
                 f.rmdir()
-        self.received_files.clear()
 
     def ray_trace_for_client(self, _):
         self.engine.queue_job("full_ray_trace")
@@ -357,6 +367,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--devices", default=-1, type=int, dest="device_count",
         help="How many processes to use for tracing.  Defaults to -1, in which case the engine decides for itself."
+    )
+    parser.add_argument(
+        "--profile", default=False, action="store_true",
+        help="Run Tensorboard profiling during computationally intensive steps."
     )
 
     # Global exception hook to pick up on exceptions thrown in worker threads.

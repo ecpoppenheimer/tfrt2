@@ -139,7 +139,6 @@ class OptimizationPane(qtw.QWidget):
                 )
             else:
                 ilum_settings = None
-            print(f"ilum settings: {ilum_settings}")
             self.server_socket.write(tcp.CLIENT_RQST_ILUM, pickle.dumps(ilum_settings))
 
     def receive_illuminance(self, data):
