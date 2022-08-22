@@ -20,6 +20,7 @@ import PyQt5.QtGui as qtg
 import pyvistaqt as pvqt
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 
 import tfrt2.drawing as drawing
 import tfrt2.settings as settings
@@ -28,6 +29,7 @@ import tfrt2.wavelength as wavelength
 import tfrt2.optics as optics
 import tfrt2.client_TCP_widget as tcp_widget
 from tfrt2.remote_controls import RemotePane
+from tfrt2.optimize import OptimizationPane
 
 
 class OpticClientWindow(qtw.QWidget):
@@ -69,6 +71,7 @@ class OpticClientWindow(qtw.QWidget):
         self.trace_pane = TraceControls(self)
         self.parameters_pane = ParameterControls(self)
         self.components_pane = ComponentControls(self)
+        self.optimize_pane = OptimizationPane(self)
         self.remote_pane = RemotePane(self)
         self.ui.pane_stack = None
         self._quit = threading.Event()
@@ -79,6 +82,7 @@ class OpticClientWindow(qtw.QWidget):
         # Illuminance plot
         plt.style.use("dark_background")
         self.ui.illuminance_widget = component_widgets.MplImshowWidget(blank=True, alignment=(.05, .05, .9, .9))
+        self.ui.illuminance_widget.box = None
 
         # Spawn a thread for performing local tracing
         self._update_rays_sig = UpdateRaysSignal()
@@ -96,6 +100,7 @@ class OpticClientWindow(qtw.QWidget):
             ("Display Settings", self.display_pane),
             ("Components", self.components_pane),
             ("Remote Operations", self.remote_pane),
+            ("Optimization Controls", self.optimize_pane),
             ("Tracing Controls", self.trace_pane),
             ("Parameters", self.parameters_pane),
         ])
@@ -269,6 +274,7 @@ class OpticClientWindow(qtw.QWidget):
         self.populate_panes_from_system(self.optical_system)
         self.tcp_widget.check_system_state()
         self.remote_pane.try_activate()
+        self.optimize_pane.try_activate()
 
     def populate_panes_from_system(self, system):
         self.display_pane.update_with_system(system)
@@ -348,11 +354,37 @@ class OpticClientWindow(qtw.QWidget):
     def quit(self):
         self._quit.set()
         self.tcp_widget.quit()
+        self.optimize_pane.history_widget.shut_down()
         try:
             self.settings.save(self.settings_path)
         except Exception:
             print(f"Client: failed to save system settings.")
         self.save_system()
+
+    def feed_ray_count_factor(self):
+        self.optimize_pane.ray_count_factor_box.edit_box.setText(str(self.settings.ray_count_factor))
+        self.remote_pane.ray_count_factor_box.edit_box.setText(str(self.settings.ray_count_factor))
+
+    def draw_illuminance_box(self, plot_extents, goal_box):
+        p_x_min, p_x_max, p_y_min, p_y_max = plot_extents
+        g_x_min, g_x_max, g_y_min, g_y_max = goal_box
+        a_x_min = min(g_x_min, p_x_min)
+        a_x_max = max(g_x_max, p_x_max)
+        a_y_min = min(g_y_min, p_y_min)
+        a_y_max = max(g_y_max, p_y_max)
+
+        if self.ui.illuminance_widget.box is not None:
+            self.ui.illuminance_widget.box.remove()
+        self.ui.illuminance_widget.box = self.ui.illuminance_widget.ax.add_patch(mpl.patches.Rectangle(
+            (g_x_min, g_y_min),
+            g_x_max - g_x_min,
+            g_y_max - g_y_min,
+            edgecolor="yellow",
+            facecolor="none",
+            linewidth=1
+        ))
+        self.ui.illuminance_widget.ax.set_xlim(a_x_min, a_x_max)
+        self.ui.illuminance_widget.ax.set_ylim(a_y_min, a_y_max)
 
 
 class UpdateRaysSignal(qtc.QObject):
@@ -433,9 +465,9 @@ class ComponentControls(qtw.QWidget):
         self.main_layout = qtw.QVBoxLayout()
         self.setLayout(self.main_layout)
 
-        save_system_button = qtw.QPushButton("Save System")
+        """save_system_button = qtw.QPushButton("Save System")
         save_system_button.clicked.connect(self.save_system)
-        self.main_layout.addWidget(save_system_button)
+        self.main_layout.addWidget(save_system_button)"""
 
         self.main_layout.addStretch()
 
@@ -471,12 +503,12 @@ class ComponentControls(qtw.QWidget):
             self.parent_scroll_area.updateGeometry()
         self.parent_client.ui.pane_stack.updateGeometry()
 
-    def save_system(self):
+    """def save_system(self):
         for widget in self._added_widgets:
             try:
                 widget.save_all()
             except Exception:
-                pass
+                pass"""
 
 
 class TraceControls(qtw.QWidget):

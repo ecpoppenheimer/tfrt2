@@ -23,6 +23,7 @@ import PyQt5.QtCore as qtc
 import tfrt2.tcp_base as tcp
 from tfrt2.settings import Settings
 from tfrt2.performance_tracer import PerformanceTracer
+from tfrt2.sources import RaySet3D
 
 
 class TraceServer(qtn.QTcpServer):
@@ -44,7 +45,10 @@ class TraceServer(qtn.QTcpServer):
         self.busy_signal.sig.connect(self.send_busy_signal)
         self._send_data = DataSignal()
         self._send_data.sig.connect(self._send_data_callback)
-        self.do_profile = args.profile
+        if args.profile:
+            prof_log_path = str(self.prof_log_path)
+        else:
+            prof_log_path = None
 
         self.clean_temp()
         # Clean out the profile folder
@@ -61,15 +65,13 @@ class TraceServer(qtn.QTcpServer):
             tcp.CLIENT_PARAMS: self.receive_parameters,
             tcp.CLIENT_RQST_ILUM: self.measure_illuminance,
             tcp.CLIENT_RESET_SYS: self.reset_system,
-            tcp.CLIENT_ABORT_PROCS: self.abort_processing
+            tcp.CLIENT_ABORT_PROCS: self.abort_processing,
+            tcp.CLIENT_SINGLE_STEP: self.single_step,
         }
 
         # Make a performance tracer, which will organize the process of doing various high-throughput computing
         # tasks on the optical system.
-        if self.do_profile:
-            self.engine = PerformanceTracer(self, None, args.device_count, self.prof_log_path)
-        else:
-            self.engine = PerformanceTracer(self, None, args.device_count)
+        self.engine = PerformanceTracer(self, None, args.device_count, prof_log_path)
 
     def got_connection(self):
         client_socket = tcp.TcpDataPacker(
@@ -328,12 +330,19 @@ class TraceServer(qtn.QTcpServer):
             *settings
         )
 
+    def single_step(self, data):
+        data = pickle.loads(data)
+        self.engine.queue_job(
+            "single_step",
+            *data
+        )
+
     def reset_system(self, _):
         self.optical_system = None
         self.cached_component_settings = None
         self.cached_parameters = None
         self.clean_temp()
-        self.engine.abort()
+        self.engine.abort_jobs()
         self.client_socket.write(tcp.SERVER_SYS_RST_ACK)
 
     def send_busy_signal(self, state):
@@ -351,6 +360,10 @@ class TraceServer(qtn.QTcpServer):
 
     def send_data(self, header, data=None):
         self._send_data.sig.emit((header, data))
+
+    def shut_down(self):
+        self.clean_temp()
+        self.engine.shut_down()
 
 
 class BusySignal(qtc.QObject):
@@ -385,6 +398,6 @@ if __name__ == "__main__":
     sys.excepthook = exception_hook
     app = qtw.QApplication([])
     server = TraceServer(tcp.DEFAULT_PORT, parser.parse_args())
-    app.aboutToQuit.connect(server.clean_temp)
+    app.aboutToQuit.connect(server.shut_down)
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     app.exec_()

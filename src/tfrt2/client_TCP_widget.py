@@ -75,7 +75,9 @@ class ClientTCPWidget(qtw.QWidget):
             tcp.SERVER_SYS_RST_ACK: self.server_ack_sys_reset,
             tcp.SERVER_READY: self.receive_server_ready,
             tcp.SERVER_BUSY: self.receive_server_busy,
-            tcp.SERVER_FLATTENER: self.feed_flattener
+            tcp.SERVER_FLATTENER: self.feed_flattener,
+            tcp.SERVER_SINGLE_STEP: self.client.optimize_pane.receive_single_step,
+            tcp.SERVER_ST_UPDATE: self.receive_status_update,
         }
 
         # Establish settings defaults
@@ -114,60 +116,66 @@ class ClientTCPWidget(qtw.QWidget):
         self.sync_controls.hide()
         sync_layout = qtw.QGridLayout()
         self.sync_controls.setLayout(sync_layout)
+        ui_row = 0
 
-        sync_layout.addWidget(qtw.QLabel("Synchronization with Server"), 0, 0, 1, 6)
-
-        # Button that will start the synchronization process
-        self.sync_button = qtw.QPushButton("Synchronize")
-        sync_layout.addWidget(self.sync_button, 1, 0, 1, 3)
-        self.sync_button.clicked.connect(self.sync_with_server)
-
-        # Button that will cancel the synchronization process
-        self.abort_button = qtw.QPushButton("Abort Synchronization")
-        self.abort_button.setEnabled(False)
-        sync_layout.addWidget(self.abort_button, 1, 3, 1, 3)
-        self.abort_button.clicked.connect(self.abort_sync)
-
-        # Progress bar indicating how many synchronization tasks remain to be completed
-        self.sync_progress = qtw.QProgressBar()
-        self.sync_progress.setRange(0, 1)
-        sync_layout.addWidget(self.sync_progress, 2, 0, 1, 6)
-
-        # label indicating whether the sync was a success
-        self.sync_status = qtw.QLabel("Status: ")
-        sync_layout.addWidget(self.sync_status, 3, 3, 1, 3)
+        sync_layout.addWidget(qtw.QLabel("Synchronization with Server"), ui_row, 0, 1, 3)
 
         # A toggleable task pane showing the name of each task that has yet to be completed.
         self.tasks_visible_checkbox = qtw.QCheckBox("Show synchronization tasks")
         self.tasks_visible_checkbox.setCheckState(False)
         self.tasks_visible_checkbox.setTristate(False)
         self.tasks_visible_checkbox.clicked.connect(self.toggle_task_pane)
-        sync_layout.addWidget(self.tasks_visible_checkbox, 3, 0, 1, 3)
+        sync_layout.addWidget(self.tasks_visible_checkbox, ui_row, 3, 1, 3)
+        ui_row += 1
 
         self.task_pane = qtw.QWidget()
         self.task_pane.hide()
         self.task_layout = qtw.QVBoxLayout()
         self.task_pane.setLayout(self.task_layout)
         self.task_pane.setStyleSheet("background-color: white;")
-        sync_layout.addWidget(self.task_pane, 4, 0, 1, 6)
+        sync_layout.addWidget(self.task_pane, ui_row, 0, 1, 6)
+        ui_row += 1
+
+        # Button that will start the synchronization process
+        self.sync_button = qtw.QPushButton("Synchronize")
+        sync_layout.addWidget(self.sync_button, ui_row, 0, 1, 3)
+        self.sync_button.clicked.connect(self.sync_with_server)
+
+        # Button that will cancel the synchronization process
+        self.abort_button = qtw.QPushButton("Abort Synchronization")
+        self.abort_button.setEnabled(False)
+        sync_layout.addWidget(self.abort_button, ui_row, 3, 1, 3)
+        self.abort_button.clicked.connect(self.abort_sync)
+        ui_row += 1
+
+        # Progress bar indicating how many synchronization tasks remain to be completed
+        self.progress_bar = qtw.QProgressBar()
+        self.progress_bar.setRange(0, 1)
+        sync_layout.addWidget(self.progress_bar, ui_row, 0, 1, 6)
+        ui_row += 1
+
+        # label indicating whether the sync was a success
+        self.status_label = qtw.QLabel("Status: No connection.")
+        sync_layout.addWidget(self.status_label, ui_row, 0, 1, 6)
+        ui_row += 1
 
         # Display whether the server is busy with a long-running operation, and provide the ability to terminate
         # it, if so.
-        sync_layout.addWidget(qtw.QLabel("Server Status:"), 5, 0, 1, 2)
+        sync_layout.addWidget(qtw.QLabel("Server:"), ui_row, 0, 1, 2)
         self.processing_indicator = qtw.QLabel("INIT")
         self.processing_indicator.setStyleSheet("border: 1px solid black;")
-        sync_layout.addWidget(self.processing_indicator, 5, 2, 1, 2)
+        sync_layout.addWidget(self.processing_indicator, ui_row, 2, 1, 2)
         self.processing_abort_button = qtw.QPushButton("Abort")
         self.processing_abort_button.setEnabled(False)
         self.processing_abort_button.clicked.connect(self.try_abort_processing)
-        sync_layout.addWidget(self.processing_abort_button, 5, 4, 1, 2)
+        sync_layout.addWidget(self.processing_abort_button, ui_row, 4, 1, 2)
         self.set_processing_state(self.UNKNOWN)
 
         self.set_connection_state(self.NO_CONNECTION)
 
     def reset_system(self):
         self.abort_sync()
-        self.sync_status.setText("Status:")
+        self.set_status("System reset.")
         self.files_sent_to_server.clear()
 
         if self.server_socket is not None:
@@ -205,7 +213,9 @@ class ClientTCPWidget(qtw.QWidget):
     def disconnected(self):
         self.close_connection(self.DISCONNECTED_REMOTE)
         self.client.remote_pane.deactivate()
+        self.client.optimize_pane.deactivate()
         self.set_processing_state(self.UNKNOWN)
+        self.set_status("Disconnected.")
 
     def got_validation(self, success):
         if success:
@@ -213,11 +223,15 @@ class ClientTCPWidget(qtw.QWidget):
             self.server_validated = True
             self.sync_controls.show()
             self.client.remote_pane.try_activate(self.server_socket)
+            self.client.optimize_pane.try_activate(self.server_socket)
+            self.set_status("Connection successful.")
         else:
             self.set_connection_state(self.VALIDATION_FAIL)
             self.server_validated = False
             self.sync_controls.hide()
             self.client.remote_pane.deactivate()
+            self.client.optimize_pane.deactivate()
+            self.set_status("Connection failed.")
 
     def socket_error(self, error):
         print(f"received socket error: {error}")
@@ -286,7 +300,8 @@ class ClientTCPWidget(qtw.QWidget):
         self.close_connection(self.DISCONNECTED_REMOTE)
         self.status_indicator.setText("Server already has connection!")
 
-    def server_error(self, data):
+    @staticmethod
+    def server_error(data):
         context, message = pickle.loads(data)
         print("Nonfatal Exception raised on server: " + context)
         print(message)
@@ -301,7 +316,7 @@ class ClientTCPWidget(qtw.QWidget):
         if self.client.optical_system is not None and self.server_socket.validated:
             self.clean_sync_stuff()
             self.abort_button.setEnabled(True)
-            self.sync_status.setText("Status: Pending")
+            self.set_status("Sync pending.")
 
             self.add_sync_task("driver_settings", self.get_clean_driver_settings())
             self.add_sync_task("system_settings", self.get_clean_system_settings())
@@ -317,14 +332,13 @@ class ClientTCPWidget(qtw.QWidget):
 
     def abort_sync(self):
         self.clean_sync_stuff()
-        self.sync_status.setText("Status: Aborted")
+        self.set_status("Sync Aborted")
 
     def clean_sync_stuff(self):
         self.total_sync_tasks = 0
-        self.sync_progress.setMaximum(1)
         self.completed_sync_tasks = 0
-        self.sync_progress.setValue(0)
         self.abort_button.setEnabled(False)
+
 
         for v in self.sync_tasks.values():
             v.deleteLater()
@@ -357,7 +371,8 @@ class ClientTCPWidget(qtw.QWidget):
         self.task_layout.addWidget(label)
 
         self.total_sync_tasks += 1
-        self.sync_progress.setMaximum(self.total_sync_tasks)
+
+        self.set_status("Sync pending.", self.completed_sync_tasks, self.total_sync_tasks)
 
     def get_clean_driver_settings(self):
         return {k: v for k, v in self.client.settings.dict.items() if k not in self.client_settings_purges}
@@ -373,13 +388,13 @@ class ClientTCPWidget(qtw.QWidget):
             return
 
         self.completed_sync_tasks += 1
-        self.sync_progress.setValue(self.completed_sync_tasks)
+        self.set_status("Sync pending.", self.completed_sync_tasks, self.total_sync_tasks)
         if status:
             label.deleteLater()
             self.sync_tasks.pop(context)
 
             if context == "system_load":
-                self.sync_status.setText("Status: Success")
+                self.set_status("Sync success.")
             else:
                 # If we have exactly one task left, 'system_load', then it is time to sent the system load request.
                 # Don't do this if we received an error, because this could cause an infinite loop.
@@ -389,7 +404,7 @@ class ClientTCPWidget(qtw.QWidget):
                     else:
                         print("SyncError: ended up with just one sync_task, but it isn't system_load.")
         else:
-            self.sync_status.setText("Status: Failure")
+            self.set_status("Sync failure.")
             label.setStyleSheet("background-color: pink;")
 
     def server_ack_driver_settings(self, data):
@@ -492,6 +507,7 @@ class ClientTCPWidget(qtw.QWidget):
     def try_abort_processing(self):
         self.set_processing_state(self.ABORTING)
         self.server_socket.write(tcp.CLIENT_ABORT_PROCS)
+        self.client.optimize_pane.set_continuous_state(state=False)
 
     def set_processing_state(self, state):
         if state == self.PROCESSING:
@@ -500,6 +516,7 @@ class ClientTCPWidget(qtw.QWidget):
             self.processing_abort_button.setEnabled(True)
             self.set_state_frozen()
         elif state == self.READY:
+            self.set_status("Completed.")
             self.processing_indicator.setText("  ready")
             self.processing_indicator.setStyleSheet("QLabel { background-color: green}")
             self.processing_abort_button.setEnabled(False)
@@ -534,3 +551,19 @@ class ClientTCPWidget(qtw.QWidget):
             flattener.compute(direction="inverse")
         except AttributeError:
             pass
+
+    def set_status(self, text, current=None, high=None):
+        if current is not None:
+            if high is None:
+                high = current
+        else:
+            current = 1
+            high = 1
+        self.progress_bar.setRange(0, high)
+        self.progress_bar.setValue(current)
+
+        self.status_label.setText("Status: " + text)
+
+    def receive_status_update(self, data):
+        self.set_status(*pickle.loads(data))
+

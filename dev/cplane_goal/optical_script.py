@@ -39,7 +39,7 @@ class LocalSystem(OpticalSystem):
             color="cyan",
             show_edges=True,
             mesh_output_path=str(pathlib.Path(self.self_path) / "lens_output.stl"),
-            mesh_input_path=str(pathlib.Path(self.self_path) / "mesh_input.stl"),
+            mesh_input_path=str(pathlib.Path(self.self_path) / "lens_input.stl"),
         )
 
         entrance_height = .005
@@ -64,6 +64,7 @@ class LocalSystem(OpticalSystem):
             mat_out=0,
             constraints=[optics.ClipConstraint(self.settings.lens, entrance_height + .05, .5)]
         )
+        lens.update()
 
         source = sources.Source3D(
             self.driver, self.self_path, self.settings.source, 580,
@@ -74,3 +75,5 @@ class LocalSystem(OpticalSystem):
         self.feed_parts(source=source, lens=lens, entrance=entrance)
 
         self.set_goal(goals.CPlaneGoal(self.driver, self.settings, "uniform", ('x', -3.0, 3.0), ('y', -3.0, 3.0), 0))
+
+        boundary_data = self.fuse_boundaries()

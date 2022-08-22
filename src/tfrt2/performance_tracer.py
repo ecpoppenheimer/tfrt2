@@ -12,6 +12,7 @@ import PyQt5.QtCore as qtc
 
 import tfrt2.tcp_base as tcp
 import tfrt2.trace_engine as engine
+import cumdistf.cdf as cdf
 
 
 class JobReady(qtc.QObject):
@@ -53,13 +54,15 @@ class PerformanceTracer:
 
     """
     def __init__(self, server, optical_system, device_count, profiler_log_path=None):
-        # TODO maybe remove the profiling option
         self.optical_system = optical_system
         self.server = server
+        self.profiler_log_path = profiler_log_path
+        self.step_number = 0
 
         self.recognized_jobs = {
             "illuminance_plot": self._illuminance_plot,
             "full_ray_trace": self._full_ray_trace,
+            "single_step": self._single_step,
         }
 
         # analyze the system and define the devices to use.  Each device will get its own process.  GPUs are
@@ -146,7 +149,11 @@ class PerformanceTracer:
                 self.server.busy_signal.sig.emit(True)
 
                 # Perform the job.  This operation will typically block for a long time
-                self.recognized_jobs[job](*args)
+                if self.profiler_log_path is None:
+                    self.recognized_jobs[job](*args)
+                else:
+                    with tf.profiler.experimental.Profile(self.profiler_log_path):
+                        self.recognized_jobs[job](*args)
 
                 # Unlock the optical system / server
                 self.busy.clear()
@@ -166,10 +173,16 @@ class PerformanceTracer:
         self.job_queue.put(("shutdown", None))
 
     def nonfatal_error(self, context, ex=None):
+        if self.optical_system is None:
+            context = context + "\nOptical system: Not loaded / synchronized."
+        else:
+            context = context + "\nOptical system: Loaded."
+
         if ex is None:
             ex = str(traceback.format_exc())
         else:
             ex = str(ex)
+
         self.server.send_data(tcp.SERVER_ERROR, pickle.dumps((context, ex)))
         print("Nonfatal exception raised: " + context)
         print(ex)
@@ -181,6 +194,9 @@ class PerformanceTracer:
                 self.job_queue.put((job_type, args))
             else:
                 self.job_queue.put((job_type, tuple()))
+
+    def send_status_update(self, message, current_step, total_steps):
+        self.server.send_data(tcp.SERVER_ST_UPDATE, pickle.dumps((message, current_step, total_steps)))
 
     def _illuminance_plot(
         self, ray_count, ray_count_factor, x_res, y_res, x_min, x_max, y_min, y_max, standalone_plot
@@ -214,10 +230,72 @@ class PerformanceTracer:
             If True, will use the x and y parameters to define the histogram, and will send this histogram to the
             client.  If False, will ignore the x and y parameters and use the system goal to histogram the data.
         """
-        # Update the optical system, and capture its boundary data.  This can be re-used for every iteration.
+        try:
+            # Update the optical system, and capture its boundary data.  This can be re-used for every iteration.
+            results = self._sub_job_management(ray_count, ray_count_factor, "fast", "Measuring Illuminance.")
+            if results is None:
+                return
+
+            processed_results = []
+            for r in results:
+                if type(r) is np.ndarray:
+                    processed_results.append(r)
+
+            full_results = np.concatenate(processed_results, axis=0)
+            if standalone_plot:
+                # Always make our own histogram, if standalone_plot was requested.  It could be a repeat of the
+                # operations to build the flattener, down below, but I don't think it is worth the trouble to check
+                # whether all the parameters between this plot and that plot are the same, which is what it would take
+                # to use the results in both locations.
+                histo, _, _ = np.histogram2d(
+                    full_results[:, 0],
+                    full_results[:, 1],
+                    bins=(x_res, y_res),
+                    range=((x_min, x_max), (y_min, y_max))
+                )
+                self.server.send_data(tcp.SERVER_ILUM, pickle.dumps(histo))
+
+            # Always feed this data to the system goal, if appropriate, and send this data to the client too, as a
+            # separate message.
+            if self.optical_system.goal is not None:
+                flat_result = self.optical_system.goal.feed_flatten(full_results)
+                if flat_result is not None:
+                    self.server.send_data(tcp.SERVER_FLATTENER, pickle.dumps(flat_result))
+
+            # Clear the data that was prepped in the workers
+            for worker in self.workers:
+                worker.prepped_data = {}
+        except Exception:
+            self.nonfatal_error("Making illuminance plot")
+
+    def _full_ray_trace(self, ray_count_factor):
+        """
+        Perform a full ray_trace and return all ray sets.
+
+        This operation takes no arguments because it uses the settings.  It does not use workers because this operation
+        is only intended to be used for testing, debugging, and display purposes.  It will frequently use only a small
+        number of rays, and I suspect that the overhead of invoking the worker processes will frequently not be worth
+        the extra power.
+        """
+        try:
+            self.optical_system.update(ray_count_factor)
+            self.optical_system.ray_trace(self.server.settings.trace_depth)
+            self.server.send_data(tcp.SERVER_TRACE_RSLT, pickle.dumps(self.optical_system.get_raysets()))
+        except Exception:
+            self.nonfatal_error("ray trace for client")
+
+    def _sub_job_management(
+        self, ray_count, ray_count_factor, sub_job_key, status_message=None, add_extra=None
+    ):
+        """
+        Manage distributing system and ray data to the sub_job queue and pulling back results.
+        """
         with tf.device(self.cpu_device):
             self.optical_system.update(update_sources=False)
             boundary_data = self.optical_system.fuse_boundaries()
+            if boundary_data[0].shape[0] == 0:
+                self.nonfatal_error("There are no optical boundaries.")
+                return
 
             # This data will not change run to run, so it can be sent to the workers now
             for i in range(len(self.workers)):
@@ -228,12 +306,11 @@ class PerformanceTracer:
                     size_epsilon=self.optical_system.size_epsilon,
                     ray_start_epsilon=self.optical_system.ray_start_epsilon,
                     new_ray_length=self.optical_system.new_ray_length,
-                    rayset_size=self.optical_system.rayset_size
                 )
 
         init = True
         traced_rays = 0
-        cached_source_rays = None
+        cached_source_data = None
         results = []
         pending_results = 0
 
@@ -241,25 +318,26 @@ class PerformanceTracer:
             # Get a sample of rays from the optical system, but only if we haven't already generated a cache of rays
             # Are caching rays because we want to be able to place them into the queue without blocking, and want to
             # save them for later if we cannot put them
-            if cached_source_rays is None:
+            if cached_source_data is None:
                 with tf.device(self.cpu_device):
-                    source_rays = self.optical_system.get_ray_sample(ray_count_factor)
-                    source_rays = self.optical_system.evaluate_n(source_rays)
-                    if source_rays.shape[0] == 0:
-                        self.nonfatal_error("illuminance_plot, but there are no sources, or they are all disabled.")
+                    source_rays, extra = self.optical_system.get_ray_sample(ray_count_factor, add_extra)
+                    source_ray_data = source_rays.prepare_for_tracer(self.optical_system.materials, extra)
+                    if source_rays.count == 0:
+                        self.nonfatal_error("There are no sources, or they are all disabled.")
                         return
             else:
                 # pull the cached rays to use for this iteration
-                source_rays = cached_source_rays
-                cached_source_rays = None
+                source_ray_data = cached_source_data
+                cached_source_data = None
 
             try:
-                self._sub_job_queue.put(("fast", (source_rays,)), False)
-                print(f"just queued {source_rays.shape[0]} rays for tracing")
+                self._sub_job_queue.put((sub_job_key, source_ray_data), False)
                 pending_results += 1
-                traced_rays += source_rays.shape[0]
+                print(f"just pushed a sub job.  pending results: {pending_results}")
+                traced_rays += source_rays.count
             except queue.Full:
-                cached_source_rays = source_rays
+                cached_source_data = source_ray_data
+                print(f"queue full, caching source data")
                 init = False
 
             # Initially, (when init == True), lets continue here to fill up the sub_job_queue until it is totally full
@@ -275,12 +353,15 @@ class PerformanceTracer:
             # queue, we will always have an excess of results.  The loop will terminate before we run out of results
             # here.  But that means we need an extra loop to pull off the last results
             result = self._result_queue.get(True)
+            pending_results -= 1
+            print(f"just got a result in phase 1.  Results: {pending_results}")
             # If the result is an error, need to send the error message and return
             if isinstance(result, SubJobError):
                 self.nonfatal_error("Illuminance plot sub-job", result)
                 return
+            if status_message is not None:
+                self.send_status_update(status_message, min(traced_rays, ray_count), ray_count)
             results.append(result)
-            pending_results -= 1
 
         # The loop has exited, meaning there are no more sub_jobs to enqueue.  But there are still results waiting,
         # so eat them until the results queue is empty.
@@ -291,57 +372,118 @@ class PerformanceTracer:
         # pending requests to make sure they all get processed.
         while pending_results > 0 and not self.abort.is_set():
             result = self._result_queue.get(True)
+            pending_results -= 1
+            print(f"just got a result in phase 2.  Results: {pending_results}")
             # If the result is an error, need to send the error message and return
             if isinstance(result, SubJobError):
                 self.nonfatal_error("Illuminance plot sub-job", result)
                 return
+            if status_message is not None:
+                self.send_status_update(status_message, min(traced_rays, ray_count), ray_count)
             results.append(result)
-            pending_results -= 1
 
         # If the loops above stopped because we aborted, then just return now
         if self.abort.is_set():
             return
 
-        # At this point we should have accumulated every result into the results list.  Just need to process and send
-        # it on its way!
-        full_results = np.concatenate(results, axis=0)
-        if standalone_plot:
-            # Always make our own histogram, if standalone_plot was requested.  Inefficient if
-            histo, _, _ = np.histogram2d(
-                full_results[:, 0],
-                full_results[:, 1],
-                bins=(x_res, y_res),
-                range=((x_min, x_max), (y_min, y_max))
-            )
-            self.server.send_data(tcp.SERVER_ILUM, pickle.dumps(histo))
+        print("finishing sub-job loop.")
+        return results
 
-        # Always feed this data to the system goal, if appropriate, and send this data to the client too, as a separate
-        # message.
-        if self.optical_system.goal is not None:
-            flat_result = self.optical_system.goal.feed_flatten(full_results)
-            if flat_result is not None:
-                self.server.send_data(tcp.SERVER_FLATTENER, pickle.dumps(flat_result))
-
-        # Clear the data that was prepped in the workers
-        for worker in self.workers:
-            worker.prepped_data = {}
-
-    def _full_ray_trace(self, ray_count_factor):
-        """
-        Perform a full ray_trace and return all ray sets.
-
-        This operation takes no arguments because it uses the settings.  It does not use workers because this operation
-        is only intended to be used for testing, debugging, and display purposes.  It will frequently use only a small
-        number of rays, and I suspect that the overhead of invoking the worker processes will frequently not be worth
-        the extra power.
-        """
+    def _single_step(self, ray_count, ray_count_factor, display_sample_count, optimize_params, routine=False):
+        if routine:
+            status_message = None
+        else:
+            status_message = "Single Optimization Step."
+        if len(self.optical_system.parameters) == 0:
+            self.nonfatal_error("single step", "Optical system has no parameters.")
+            return
+        if self.optical_system.goal is None:
+            self.nonfatal_error("single step", "Optical system has no goal.")
+            return
         try:
-            self.optical_system.update(ray_count_factor)
-            self.optical_system.ray_trace(self.server.settings.trace_depth)
-            all_raysets = self.optical_system.get_raysets(numpy=True)
-            self.server.send_data(tcp.SERVER_TRACE_RSLT, pickle.dumps(all_raysets))
+            # Perform the trace pre-compilation
+            results = self._sub_job_management(
+                ray_count, ray_count_factor, "precompile_trace", status_message=status_message,
+                add_extra=self.optical_system.goal.add_extra
+            )
+
+            if self.abort.is_set() or results is None:
+                return
+
+            # Results is a list of tuples.  Separate it out into three lists
+            compiled_trig_map = []
+            compiled_tm_indices = []
+            compiled_s = []
+            compiled_hat = []
+            compiled_n = []
+            compiled_meta = []
+            compiled_wv = []
+            compiled_extra = []
+            for result in results:
+                try:
+                    source_rays, trig_map, tm_indices = result
+                    if self.optical_system.goal.add_extra is None:
+                        s, hat, n, meta, wv = source_rays
+                    else:
+                        s, hat, n, meta, wv, extra, = source_rays
+                        compiled_extra.append(extra)
+                    compiled_s.append(s)
+                    compiled_hat.append(hat)
+                    compiled_n.append(n)
+                    compiled_meta.append(meta)
+                    compiled_wv.append(wv)
+                    compiled_trig_map.append(trig_map)
+                    compiled_tm_indices.append(tm_indices)
+                except ValueError:
+                    print(f"just got a bad result while compiling: {result}")
+
+            # Fuse the lists into tensors
+            s = tf.concat(compiled_s, axis=0)
+            hat = tf.concat(compiled_hat, axis=0)
+            n = tf.concat(compiled_n, axis=0)
+            wv = np.concatenate(compiled_wv, axis=0)
+            meta = tf.concat(compiled_meta, axis=0)
+            if self.optical_system.goal.add_extra is None:
+                extra = tf.zeros((s.shape[0], 0), dtype=tf.float64)
+            else:
+                extra = tf.concat(compiled_extra, axis=0)
+            trig_map, tm_indices = ragged_concatenate(compiled_trig_map, compiled_tm_indices)
+
+            if self.abort.is_set():
+                return
+
+            # Run the optimization, and retrieve a sample of finished rays for display/debugging
+            do_smooth, learning_rate, momentum, grad_clip_low, grad_clip_high = optimize_params
+            ray_sample = self.optical_system.optimize_step(
+                s, hat, n, meta, extra, trig_map, tm_indices,
+                tf.convert_to_tensor(self.server.settings.trace_depth, dtype=tf.int32),
+                learning_rate,
+                momentum,
+                (grad_clip_high, grad_clip_low, do_smooth)
+            )
+
+            if self.abort.is_set():
+                return
+
+            # Compile a sample of rays to send
+            finished_s, finished_hat, finished_meta = ray_sample
+            finished_rays = (
+                finished_s[:display_sample_count].numpy(),
+                finished_hat[:display_sample_count].numpy(),
+                wv[finished_meta[:display_sample_count].numpy()]
+            )
+
+            # Compile the new, updated parameters
+            params = [p.numpy() for p in self.optical_system.parameters]
+
+            self.server.send_data(tcp.SERVER_SINGLE_STEP, pickle.dumps((finished_rays, params)))
+        except cdf.ComputeRequiredError:
+            self.nonfatal_error(
+                "single step",
+                "Goal has not had illuminance calculated (available under remote operations)."
+            )
         except Exception:
-            self.nonfatal_error("ray trace for client")
+            self.nonfatal_error("single step")
 
 
 class Worker:
@@ -355,7 +497,8 @@ class Worker:
         self.prepped_data = {}
 
         self.job_LUT = {
-            "fast": self._fast
+            "fast": self._fast,
+            "precompile_trace": self._precompile_trace,
         }
 
     def prep_data(self, **kwargs):
@@ -365,8 +508,8 @@ class Worker:
         try:
             while not self.shutdown.is_set():
                 job, args = self.job_queue.get(True)
-                t = time.time()
-                print(f"worker is starting a job {t - self.last_time} s after ending last one")
+                # t = time.time()  # TODO remote timeing
+                # print(f"worker is starting a job {t - self.last_time} s after ending last one")
                 # Always need to put something in the result queue every time something is removed from the job_queue,
                 # even in the case of an error, to make sure things don't get out of sync.
                 try:
@@ -374,30 +517,37 @@ class Worker:
                 except Exception:
                     self.result_queue.put(SubJobError(traceback.format_exc()), True)
                 self.last_time = time.time()
-                print(f"worker just finished its job in {self.last_time-t} s")
+                # print(f"worker just finished its job in {self.last_time-t} s")
         except KeyboardInterrupt:
             # Basically just to hide the error messages when it gets keyboard interrupt.  But there has to be a better
             # way, that also catches other termination methods...
             return
 
-    def _fast(self, source_rays):
+    def _fast(self, *source_data):
         with tf.device(self.device):
-            t1 = time.time()
-            boundary_points, boundary_norms, metadata = self.prepped_data["boundary_data"]
-            trace_depth = self.prepped_data["trace_depth"]
-            intersect_epsilon = self.prepped_data["intersect_epsilon"]
-            size_epsilon = self.prepped_data["size_epsilon"]
-            ray_start_epsilon = self.prepped_data["ray_start_epsilon"]
-            new_ray_length = self.prepped_data["new_ray_length"]
-            rayset_size = self.prepped_data["rayset_size"]
-
-            t2 = time.time()
-            output = engine.fast_trace_loop(
-                source_rays, boundary_points, boundary_norms, metadata, trace_depth, intersect_epsilon, size_epsilon,
-                ray_start_epsilon, new_ray_length, rayset_size
+            ray_s, ray_hat, ray_meta = engine.fast_trace_loop(
+                *source_data[:4],
+                *self.prepped_data["boundary_data"],
+                self.prepped_data["trace_depth"],
+                self.prepped_data["intersect_epsilon"],
+                self.prepped_data["size_epsilon"],
+                self.prepped_data["ray_start_epsilon"],
+                self.prepped_data["new_ray_length"]
             )
-            print(f"   worker spent {t2-t1}s prepping data and {time.time() - t2}s running the loop")
-            return output[:, 3:6].numpy()
+            return (ray_s + ray_hat).numpy()
+
+    def _precompile_trace(self, *source_data):
+        with tf.device(self.device):
+            trig_map, trig_map_indices = engine.trace_sample_loop(
+                *source_data[:4],
+                *self.prepped_data["boundary_data"],
+                self.prepped_data["trace_depth"],
+                self.prepped_data["intersect_epsilon"],
+                self.prepped_data["size_epsilon"],
+                self.prepped_data["ray_start_epsilon"],
+                self.prepped_data["new_ray_length"]
+            )
+            return source_data, trig_map, trig_map_indices
 
 
 class SubJobError:
@@ -406,3 +556,45 @@ class SubJobError:
 
     def __str__(self):
         return "Sub Job Error: " + str(self._traceback)
+
+
+def ragged_concatenate(flat_list, index_list):
+    """
+    Concatenate a list of ragged tensors (which are just 2-tuples, flattened and indices) into a single ragged tensor.
+
+    Parameters
+    ----------
+    flat_list : list of 1-D tensor
+        A list of the flattened data for the ragged tensors
+    index_list : list of 1-D tensor
+        A list of the index tensors for each ragged tensor.
+
+    Returns
+    -------
+    flattened : 1-D tensor
+        The concatenated flattened ragged tensor
+    indices : 1-D tensor
+        The indices that slice the ragged tensor
+
+    """
+    ragged_row_count = int(tf.reduce_max([each.shape[0] for each in index_list])) - 1
+    ragged_rows = [list() for i in range(ragged_row_count)]
+
+    for flat, i in zip(flat_list, index_list):
+        last_row = int(i.shape[0])
+        for row in range(last_row - 2):
+            ragged_rows[row].append(flat[i[row]:i[row + 1]])
+        ragged_rows[last_row-2].append(flat[i[last_row-2]:])
+
+    joined_rows = []
+    indices = [0]
+    position = 0
+    for row in range(len(ragged_rows)):
+        new_row = tf.concat(ragged_rows[row], axis=0)
+        new_row_size = int(new_row.shape[0])
+        position += new_row_size
+        joined_rows.append(new_row)
+        indices.append(position)
+    return tf.concat(joined_rows, axis=0), tf.convert_to_tensor(indices, dtype=tf.int32)
+
+

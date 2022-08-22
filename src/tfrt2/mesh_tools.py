@@ -633,7 +633,7 @@ def neighbors_from_faces(point, faces):
 
 def get_closest_point(vertices, target):
     """
-    Gets the index of the point in the mesh closest (in cartesian distance) to traget.
+    Gets the index of the point in the mesh closest (in cartesian distance) to target.
     """
     distance = np.sum((vertices - target)**2, axis=1)
     return np.argmin(distance)

@@ -1,14 +1,12 @@
-import numpy as np
 import pyvista as pv
-import pathlib
 
-import tfrt2.mesh_tools as mt
 import tfrt2.materials as materials
 import tfrt2.optics as optics
-import tfrt2.vector_generator as vg
+
 import tfrt2.sources as sources
 import tfrt2.distributions as distributions
 from tfrt2.optical_system import OpticalSystem
+from tfrt2.goal import CPlaneGoal
 
 
 def get_system(driver):
@@ -68,3 +66,6 @@ class LocalSystem(OpticalSystem):
         )
 
         self.feed_parts(source=source, light=light, heavy=heavy, target=target)
+        self.set_goal(CPlaneGoal(
+            self.driver, self.settings, "uniform", ('x', -3.0, 3.0), ('y', -3.0, 3.0), 0, ""
+        ))

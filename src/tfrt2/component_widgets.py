@@ -245,9 +245,9 @@ class SettingsComboBox(qtw.QWidget):
 
 
 class SettingsVectorBox(qtw.QWidget):
-    def __init__(self, component, label, settings_key, callback=None):
+    def __init__(self, settings, label, settings_key, callback=None):
         super().__init__()
-        self.component = component
+        self.settings = settings
         self.settings_key = settings_key
 
         layout = qtw.QHBoxLayout()
@@ -256,7 +256,7 @@ class SettingsVectorBox(qtw.QWidget):
         layout.addWidget(qtw.QLabel(label))
         self.entries = []
         for i in range(3):
-            initial = component.settings.dict[settings_key][i]
+            initial = self.settings.dict[settings_key][i]
             entry = qtw.QLineEdit()
             self.entries.append(entry)
             entry.setText(str(initial))
@@ -280,15 +280,15 @@ class SettingsVectorBox(qtw.QWidget):
 
     def callback_x(self):
         value = float(self.entries[0].text())
-        self.component.settings.dict[self.settings_key][0] = value
+        self.settings.dict[self.settings_key][0] = value
 
     def callback_y(self):
         value = float(self.entries[1].text())
-        self.component.settings.dict[self.settings_key][1] = value
+        self.settings.dict[self.settings_key][1] = value
 
     def callback_z(self):
         value = float(self.entries[2].text())
-        self.component.settings.dict[self.settings_key][2] = value
+        self.settings.dict[self.settings_key][2] = value
 
 
 class SettingsCheckBox(qtw.QWidget):
@@ -298,7 +298,8 @@ class SettingsCheckBox(qtw.QWidget):
         layout = qtw.QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
-        layout.addWidget(qtw.QLabel(label))
+        self.label = qtw.QLabel(label)
+        layout.addWidget(self.label)
 
         check_box = qtw.QCheckBox()
         layout.addWidget(check_box)
@@ -428,13 +429,12 @@ class MplImshowWidget(MPLWidget):
     ):
         super().__init__(blank=blank, *args, **kwargs)
         if initial_data is None:
-            initial_data = np.zeros((5, 5))
+            initial_data = np.zeros((1, 1))
         self.plot = self.ax.imshow(initial_data, origin="lower", cmap="gray")
 
-    def set_data(self, data):
+    def set_data(self, data, extent):
         self.plot.set_data(data)
-        #self.ax.set_xlim(0, data.shape[0])
-        #self.ax.set_ylim(0, data.shape[1])
+        self.plot.set_extent(extent)
         self.plot.set_clim(np.min(data), np.max(data))
         self.draw()
 
@@ -492,6 +492,7 @@ class ParameterController(qtw.QWidget):
         # Button to reset the parameters
         reset_widget = qtw.QWidget()
         reset_layout = qtw.QHBoxLayout()
+        reset_layout.setContentsMargins(0, 0, 0, 0)
         reset_widget.setLayout(reset_layout)
         reset_button = qtw.QPushButton("Reset to initials")
 
@@ -532,6 +533,7 @@ class ParameterController(qtw.QWidget):
             if self.component.accumulator is not None:
                 acumulator_widget = qtw.QWidget()
                 acumulator_layout = qtw.QGridLayout()
+                acumulator_layout.setContentsMargins(0, 0, 0, 0)
                 acumulator_widget.setLayout(acumulator_layout)
 
                 acumulator_layout.addWidget(qtw.QLabel("Test Accumulator"), 0, 0)
@@ -554,14 +556,20 @@ class ParameterController(qtw.QWidget):
             pass
 
         # Make a smoother
-        self.component.settings.establish_defaults(smooth_stddev=.05)
         main_layout.addWidget(SettingsEntryBox(
-            self.component.settings, "smooth_stddev", float, qtg.QDoubleValidator(1e-6, 1e6, 8), self.make_smoother
-        ), 6, 0, 1, 2)
-        self.make_smoother()
+            self.component.settings, "smooth_stddev", float, qtg.QDoubleValidator(1e-6, 1e6, 8), self.update_smoother
+        ), 6, 0, 1, 1)
+        main_layout.addWidget(SettingsCheckBox(
+            self.component.settings, "smooth_active", "Active"
+        ), 6, 1, 1, 1)
         smooth_button = qtw.QPushButton("Test Smoother")
         smooth_button.clicked.connect(self.test_smoother)
         main_layout.addWidget(smooth_button, 7, 0, 1, 1)
+
+        # Entry box for the relative LR
+        main_layout.addWidget(SettingsEntryBox(
+            self.component.settings, "relative_lr", float, qtg.QDoubleValidator(0, 1e10, 8), self.update_smoother
+        ), 8, 0, 1, 2)
 
         # optionally register a callback to update the parameters from the boundary.  This only works if the boundary
         # explicitly calls the signal
@@ -628,13 +636,11 @@ class ParameterController(qtw.QWidget):
         except AttributeError:
             pass
 
-    def make_smoother(self):
-        self.smoother = self.component.get_smoother(self.component.settings.smooth_stddev)
+    def update_smoother(self):
+        self.component.smoother = self.component.get_smoother(self.component.settings.smooth_stddev)
 
     def test_smoother(self):
-        if self.smoother is None:
-            self.make_smoother()
-        self.component.smooth(self.smoother)
+        self.component.smooth(None)
         self.update_everything()
 
 
@@ -789,7 +795,7 @@ class MeshTricksController(qtw.QWidget):
 
             main_layout.addWidget(
                 SettingsVectorBox(
-                    self.component,
+                    self.component.settings,
                     "VUM Origin",
                     "vum_origin",
                     [self.update_vum_origin_display, self.component.try_mesh_tools]
@@ -813,7 +819,7 @@ class MeshTricksController(qtw.QWidget):
 
             main_layout.addWidget(
                 SettingsVectorBox(
-                    self.component,
+                    self.component.settings,
                     "Acum Origin",
                     "accumulator_origin",
                     [self.update_acum_origin_display, self.component.try_mesh_tools]

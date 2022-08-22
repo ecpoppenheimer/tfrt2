@@ -33,7 +33,7 @@ class LocalSystem(OpticalSystem):
             color="cyan",
             show_edges=False,
             mesh_output_path=str(pathlib.Path(self.self_path) / "entrance_output.stl"),
-            mesh_input_path=str(pathlib.Path(self.self_path) / "mesh_input.stl"),
+            mesh_input_path=str(pathlib.Path(self.self_path) / "lens_input.stl"),
         )
         self.settings.lens.establish_defaults(
             visible=True,
@@ -68,7 +68,10 @@ class LocalSystem(OpticalSystem):
             mat_in=1,
             mat_out=0,
             filter_fixed=filter_fixed,
-            constraints=[optics.ClipConstraint(self.settings.lens, entrance_height + .05, 100)]
+            constraints=[
+                optics.ThicknessConstraint(self.settings.lens, entrance_height + .02, True),
+                optics.ClipConstraint(self.settings.lens, entrance_height + .02, .1)
+            ]
         )
         self.feed_part("lens", lens)
 

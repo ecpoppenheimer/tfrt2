@@ -1,6 +1,5 @@
 import pickle
 
-import numpy as np
 import PyQt5.QtWidgets as qtw
 import PyQt5.QtGui as qtg
 
@@ -51,9 +50,11 @@ class RemotePane(qtw.QWidget):
         self.remote_raytrace_button.clicked.connect(self.remote_raytrace)
         main_layout.addWidget(self.remote_raytrace_button, self.ui_row, 1, 1, 3)
 
-        main_layout.addWidget(cw.SettingsEntryBox(
-            self.parent_client.settings, "ray_count_factor", float, qtg.QDoubleValidator(1e-4, 1e6, 6)
-        ), self.ui_row, 4, 1, 3)
+        self.ray_count_factor_box = cw.SettingsEntryBox(
+            self.parent_client.settings, "ray_count_factor", float, qtg.QDoubleValidator(1e-4, 1e6, 6),
+            callback=self.parent_client.feed_ray_count_factor
+        )
+        main_layout.addWidget(self.ray_count_factor_box, self.ui_row, 4, 1, 3)
         self.ui_row += 1
 
         # Controls for tracing to make the illuminance plot (also defines the goal flatten icdf)
@@ -117,10 +118,10 @@ class RemotePane(qtw.QWidget):
             self.error_widget.setText("Load an optical system to activate.")
             self._deactivate()
         elif self.parent_client.optical_system.goal is None:
-            self.error_widget.setText("Optical system requires a goal to activate optimization\n and analysis controls")
+            self.error_widget.setText("Optical system requires a goal to activate remote controls.")
             self._deactivate()
         elif self.server_socket is None:
-            self.error_widget.setText("Connect to a trace server to activate optimization\n and analysis controls.")
+            self.error_widget.setText("Connect to a trace server to activate remote controls.")
             self._deactivate()
         else:
             # are able to activate
@@ -139,7 +140,7 @@ class RemotePane(qtw.QWidget):
     def deactivate(self):
         self.active_widget.hide()
         self.server_socket = None
-        self.error_widget.setText("Connect to a trace server to activate optimization\n and analysis controls.")
+        self.error_widget.setText("Connect to a trace server to activate remote controls.")
         self.error_widget.show()
         self._active = False
 
@@ -154,15 +155,31 @@ class RemotePane(qtw.QWidget):
                 )
             else:
                 ilum_settings = (self.parent_client.settings.ray_count_factor,)
+            self.parent_client.tcp_widget.set_status("Measuring Illuminance.", 0, 1)
             self.server_socket.write(tcp.CLIENT_RQST_ILUM, pickle.dumps(ilum_settings))
 
     def receive_illuminance(self, data):
-        print("just received illuminance data!")
         illuminance = pickle.loads(data)
         if self.parent_client.optical_system.goal is not None:
             self.parent_client.optical_system.goal.feed_flatten(illuminance)
-        self.parent_client.ui.illuminance_widget.set_data(illuminance)
+        self.parent_client.ui.illuminance_widget.set_data(illuminance, self.get_extents())
+        self.parent_client.draw_illuminance_box(self.get_extents(), self.get_goal_box())
         self.parent_client.ui.illuminance_widget.draw()
+
+    def get_extents(self):
+        plot_x_min = self.parent_client.settings.rq_illum_x_min
+        plot_x_max = self.parent_client.settings.rq_illum_x_max
+        plot_y_min = self.parent_client.settings.rq_illum_y_min
+        plot_y_max = self.parent_client.settings.rq_illum_y_max
+        return plot_x_min, plot_x_max, plot_y_min, plot_y_max
+
+    def get_goal_box(self):
+        goal_x_min = self.parent_client.optical_system.goal.settings.c1_min
+        goal_x_max = self.parent_client.optical_system.goal.settings.c1_max
+        goal_y_min = self.parent_client.optical_system.goal.settings.c2_min
+        goal_y_max = self.parent_client.optical_system.goal.settings.c2_max
+
+        return goal_x_min, goal_x_max, goal_y_min, goal_y_max
 
     def pull_rq_illum_lims(self):
         self.rq_illum_x_lims.set_range(
@@ -175,6 +192,7 @@ class RemotePane(qtw.QWidget):
         )
 
     def remote_raytrace(self):
+        self.parent_client.tcp_widget.set_status("Remote raytrace...", 0, 1)
         self.parent_client.trace_pane.clear_rays()
         self.server_socket.write(tcp.CLIENT_RQST_TRACE, pickle.dumps(self.parent_client.settings.ray_count_factor))
 

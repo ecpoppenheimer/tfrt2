@@ -1,9 +1,11 @@
 from pathlib import Path
 
 import tensorflow as tf
+import numpy as np
 
-import tfrt2.settings as settings
+from tfrt2.settings import Settings, save as settings_save
 from tfrt2.trace_engine import TraceEngine3D
+import tfrt2.sources as sources
 
 
 class OpticalSystem(TraceEngine3D):
@@ -49,7 +51,7 @@ class OpticalSystem(TraceEngine3D):
         """
         super().__init__(tuple(materials), **kwargs)
         self.driver = driver
-        self.settings = settings.Settings()
+        self.settings = Settings()
         self.self_path = self.driver.settings.system_path
         self.settings_path = Path(self.driver.settings.system_path) / Path(settings_file_name)
         try:
@@ -64,12 +66,13 @@ class OpticalSystem(TraceEngine3D):
         self.targets = []
         self.sources = []
         self.parametric_optics = []
+        self.parameters = []
 
         # parts, index-able by name
         self.parts = {}
 
         # The ray sets
-        self.source_rays = tf.zeros((0, 7), dtype=tf.float64)
+        self.source_rays = sources.RaySet3D()
 
         # Check the component declaration, and initialize settings for each component
         self._part_boxes = {}
@@ -84,7 +87,7 @@ class OpticalSystem(TraceEngine3D):
             # component boxes differ from the allowed values of tp by just an s, so we can figure out which box
             # to put each component in by adding an s and getting the appropriate box from the system.
             self._part_boxes[name] = getattr(self, tp + "s")
-        self.settings.establish_defaults(**{name: settings.Settings() for name in component_declaration.keys()})
+        self.settings.establish_defaults(**{name: Settings() for name in component_declaration.keys()})
 
     def feed_parts(self, **d):
         for name, part in d.items():
@@ -96,6 +99,7 @@ class OpticalSystem(TraceEngine3D):
             part.name = name
             if hasattr(part, "parameters"):
                 self.parametric_optics.append(part)
+                self.parameters.append(part.parameters)
 
     def feed_part(self, name, part):
         try:
@@ -106,6 +110,7 @@ class OpticalSystem(TraceEngine3D):
         part.name = name
         if hasattr(part, "parameters"):
             self.parametric_optics.append(part)
+            self.parameters.append(part.parameters)
 
     def set_goal(self, goal):
         if self.goal is not None:
@@ -132,24 +137,32 @@ class OpticalSystem(TraceEngine3D):
         if self.settings_path is not None:
             # Need to convert nested settings to dicts before saving.  This only works for a single layer of nesting.
             output_dict = {
-                key: value.dict if type(value) is settings.Settings else value
+                key: value.dict if type(value) is Settings else value
                 for key, value in self.settings.dict.items()
             }
-            settings.save(output_dict, self.settings_path)
+            settings_save(output_dict, self.settings_path)
 
     def refresh_source_rays(self):
         if self.sources:
-            self.source_rays = tf.concat([s.rays for s in self.sources], axis=0)
+            self.source_rays = sources.RaySet3D.concatenate(tuple(s.rays for s in self.sources))
         else:
-            self.source_rays = tf.zeros((0, 7), dtype=tf.float64)
+            self.source_rays = sources.RaySet3D()
 
-    def get_ray_sample(self, raycount_factor=1):
+    def get_ray_sample(self, raycount_factor=1, add_extra=None):
         if self.sources:
+            extras = []
             for s in self.sources:
                 s.update(raycount_factor)
-            return tf.concat([s.rays for s in self.sources], axis=0)
+                if add_extra is not None:
+                    extras.append(add_extra(s))
+            ray_sample = sources.RaySet3D.concatenate([s.rays for s in self.sources])
+            ray_sample.meta = np.arange(ray_sample.s.shape[0])
+            if add_extra is None:
+                return ray_sample, None
+            else:
+                return ray_sample, np.concatenate(extras, axis=0)
         else:
-            return tf.zeros((0, 7), dtype=tf.float64)
+            return sources.RaySet3D(), None
 
     def cleanup(self):
         if self.goal is not None:

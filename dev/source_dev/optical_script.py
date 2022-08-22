@@ -27,7 +27,7 @@ class LocalSystem(optical_system.OpticalSystem):
                 self.settings.source1,
                 "",
                 #base_points=distributions.PixelatedCircle(self.settings.source1, resolution=51),
-                base_points=distributions.PerfectCircle(self.settings.source1, driver, resolution=51, mode="base_points"),
+                base_points=distributions.PerfectCircle(self.settings.source1, driver, mode="base_points"),
                 #base_points=distributions.Square(self.settings.source1),
                 aperture=distributions.Square(self.settings.source1, driver, mode="aperture"),
                 #angles=distributions.PerfectUniformSphere(self.settings.source1)

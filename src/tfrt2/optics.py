@@ -92,6 +92,9 @@ class TriangleOptic:
         self.face_vertices = None
         self.norm = None
         self.flip_norm = flip_norm
+        self.p = None
+        self.u = None
+        self.v = None
 
         if not hold_load:
             if mesh is None:
@@ -133,13 +136,10 @@ class TriangleOptic:
         self.face_vertices = mt.points_from_faces(self.vertices, self.faces)
 
     def compute_norm(self):
-        first_points, second_points, third_points = self.face_vertices
-        self.norm = tf.linalg.normalize(
-            tf.linalg.cross(
-                second_points - first_points,
-                third_points - first_points
-            ),
-            axis=1)[0]
+        self.p, second_points, third_points = self.face_vertices
+        self.u = second_points - self.p
+        self.v = third_points - self.p
+        self.norm = tf.linalg.normalize(tf.linalg.cross(self.u, self.v), axis=1)[0]
 
     def update(self):
         pass
@@ -300,6 +300,7 @@ class ParametricTriangleOptic(TriangleOptic):
         self._qt_compat = qt_compat
         self._d_mat = None
         self.movable_indices = None
+        self.smoother = None
         if qt_compat:
             self.parameters_updated = ParamsUpdatedSignal()
         else:
@@ -313,7 +314,10 @@ class ParametricTriangleOptic(TriangleOptic):
             vum_origin=(0, 0, 0),
             vum_active=True,
             accumulator_origin=(0, 0, 0),
-            accumulator_active=True
+            accumulator_active=True,
+            smooth_stddev=.05,
+            smooth_active=True,
+            relative_lr=1.0,
         )
 
         if (self.enable_vum or self.enable_accumulator) and self.driver.driver_type == "client":
@@ -416,9 +420,6 @@ class ParametricTriangleOptic(TriangleOptic):
             # Now need to construct the gather_params, a set of indices that can be used to gather from parameters to
             # zero points.
             self.gather_params = tf.constant([drivens_driver[key] for key in range(movable_count)], dtype=tf.int32)
-            self._foo = [reindex_driver[v] for v in self.driver_indices]
-        else:
-            self._foo = self.driver_indices
 
         if self.any_fixed:
             # Now need to construct gather_vertices, a set of indices that can be used to gather from
@@ -441,6 +442,7 @@ class ParametricTriangleOptic(TriangleOptic):
         self.update()
         self.enable_vum = enable_vum
         self.try_mesh_tools()
+        self.smoother = self.get_smoother(self.settings.smooth_stddev)
 
     def try_mesh_tools(self):
         vertices = self.get_vertices_from_params(tf.zeros_like(self.parameters))
@@ -491,6 +493,16 @@ class ParametricTriangleOptic(TriangleOptic):
             all_vertices = tf.concat((self.fixed_points, vertices), axis=0)
             vertices = tf.gather(all_vertices, self.gather_vertices, axis=0)
         return vertices
+
+    def find_closest_parameter_to(self, point):
+        p_indices = tf.range(self.parameters.shape[0])
+        if self.any_driven:
+            # If any vertices are driven, we need expand the parameters to match the shape of the zero points.
+            p_indices = tf.gather(p_indices, self.gather_params, axis=0)
+        # p_indices should now be a list of parameter indices that matches up to movable_vertices
+
+        v_index = mt.get_closest_point(self.zero_points, point)
+        return p_indices[v_index]
 
     def constrain(self):
         if not self.frozen:
@@ -574,13 +586,18 @@ class ParametricTriangleOptic(TriangleOptic):
 
         # Gaussian smoother, which is a matrix that can be left-multiplied with parameters
         smoother = tf.exp(-.5 * (self._d_mat / stddev) ** 2)
-        # Normalize, so that the average position of the surface is conserved.  I... am really unsure which axis
-        # we need to normalize over.
-        smoother /= tf.reduce_sum(smoother, axis=0)
+        # Normalize, so that the average position of the surface is conserved.  I spent a bunch of time fretting about
+        # this - couldn't get it to actually normalize the right (second) axis.  But months later I realized... I needed
+        # a reshape, so that the norm broadcasts to the correct axis.
+        smoother /= tf.reshape(tf.reduce_sum(smoother, axis=1), (-1, 1))
         return smoother
 
     def smooth(self, smoother):
-        self.param_assign(tf.matmul(smoother, self.parameters))
+        if smoother is None:
+            smoother = self.smoother
+        if smoother is not None:
+            if self.settings.smooth_active:
+                self.param_assign(tf.matmul(smoother, self.parameters))
 
     def _process_constraints(self, constraints):
         if constraints is None:
@@ -742,18 +759,86 @@ class ClipConstraint(qtw.QWidget):
         ))
 
 
-class SpacingConstraint(qtw.QWidget):
-    def __init__(self, settings, min, target=None, mode="min"):
+class ThicknessConstraint(qtw.QWidget):
+    def __init__(self, settings, val, min_mode=True):
         super().__init__()
         self.settings = settings
-        self.target=target
+        self.settings.establish_defaults(thickness_constraint=val, thickness_mode_min=min_mode)
+        layout = qtw.QHBoxLayout()
+        layout.setContentsMargins(11, 11, 0, 11)
+        layout.addWidget(cw.SettingsEntryBox(
+            self.settings, "thickness_constraint", float, validator=qtg.QDoubleValidator(-1e6, 1e6, 9),
+            label="Thickness"
+        ))
+        self.mode_checkbox = cw.SettingsCheckBox(
+            self.settings, "thickness_mode_min", "...", callback=self.mode_toggled
+        )
+        self.mode_toggled()
+        layout.addWidget(self.mode_checkbox)
+        self.setLayout(layout)
+
+    def mode_toggled(self):
+        if self.settings.thickness_mode_min:
+            self.mode_checkbox.label.setText("Minimum")
+        else:
+            self.mode_checkbox.label.setText("Maximum")
+
+    def __call__(self, component):
+        if self.settings.thickness_mode_min:
+            diff = self.settings.thickness_constraint - tf.reduce_min(component.parameters)
+        else:
+            diff = self.settings.thickness_constraint - tf.reduce_max(component.parameters)
+        component.param_assign_add(tf.broadcast_to(diff, component.parameters.shape))
+
+
+class PointConstraint(qtw.QWidget):
+    """
+    This hasn't been rigorously tested with fixed and driven vertices!!!
+
+    Fixed_constraint is a distance in parameter space - it is relative to the zero points
+    """
+    def __init__(self, settings, fixed_constraint, fixed_center):
+        super().__init__()
+        self.settings = settings
+        self.settings.establish_defaults(
+            fixed_constraint=fixed_constraint, fixed_center=np.array(fixed_center, dtype=np.float64)
+        )
+        layout = qtw.QVBoxLayout()
+        layout.setContentsMargins(11, 11, 0, 11)
+        layout.addWidget(cw.SettingsEntryBox(
+            self.settings, "fixed_constraint", float, validator=qtg.QDoubleValidator(-1e6, 1e6, 9),
+            label="Fixed Pos"
+        ))
+        self.mode_checkbox = cw.SettingsVectorBox(
+            self.settings, "Fixed Point", "fixed_center", callback=self.moved_fixed
+        )
+        self._fixed_vertex = None
+        self.moved_fixed()
+        layout.addWidget(self.mode_checkbox)
+        self.setLayout(layout)
+
+    def moved_fixed(self):
+        self._fixed_vertex = None
+
+    def __call__(self, component):
+        if self._fixed_vertex is None:
+            self._fixed_vertex = component.find_closest_parameter_to(component.settings.fixed_center)
+        diff = self.settings.fixed_constraint - component.parameters[self._fixed_vertex]
+        component.param_assign_add(tf.broadcast_to(diff, component.parameters.shape))
+
+
+class SpacingConstraint(qtw.QWidget):
+    def __init__(self, settings, distance_constraint, target=None, mode="min"):
+        super().__init__()
+        self.settings = settings
+        self.target  =target
         if mode == "min":
             self._reduce = tf.reduce_min
         elif mode == "max":
             self._reduce = tf.reduce_max
         else:
             raise ValueError(f"FixedMinDistanceConstraint: mode must be 'min' or 'max'.")
-        self.settings.establish_defaults(distance_constraint=min)
+        self.settings.establish_defaults(distance_constraint=distance_constraint)
         layout = qtw.QHBoxLayout()
         layout.setContentsMargins(11, 11, 0, 11)
         layout.addWidget(cw.SettingsEntryBox(

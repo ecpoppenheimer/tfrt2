@@ -89,6 +89,11 @@ error_function() is technically a public method, that could be overwritten.  It 
 and computes the error.  By default, this is the squared difference, but I have experimented with different error
 functions in the past, so I am leaving this open to experimentation.
 
+add_extra is a public attribute that is by default None.  If it is not None, it can be a function that takes
+a source as a single argument and returns a tensor that contains some data extracted from or associated with that
+source.  This is intended as a way of, for instance, pumping the necessary start point data through the system so that
+an imaging problem can be formulated.  NOT TESTED.
+
 """
 
 import traceback
@@ -164,6 +169,7 @@ class CPlaneGoal:
         self.auto_far_edge_distance = auto_far_edge_distance
         self.auto_far_back_distance = auto_far_back_distance
         self.error_function = error_function
+        self.add_extra = None
 
         # Validate mode
         if mode == "imaging":
@@ -179,6 +185,7 @@ class CPlaneGoal:
 
         # Set up the flattening icdf.  Valid for modes uniform, custom, and cdf.
         self.flatten_density = None
+        self.flatten_ready = False
         if mode in {"uniform", "custom", "cdf"}:
             self.flattening_icdf = cdf.CumulativeDistributionFunction2D(
                 ((0.0, 1.0), (0.0, 1.0)), direction="backward"
@@ -186,6 +193,7 @@ class CPlaneGoal:
             self.flatten = self.flattening_icdf.icdf
         else:
             self.flattening_icdf = None
+            #self.flatten_ready = True  # Needs to be added once this is implemented.
             self.flatten = self._not_implemented
 
         # Set up the goal cdf
@@ -428,6 +436,7 @@ class CPlaneGoal:
             if self.flatten_density is not None:
                 self.flattening_icdf.set_resolution(*self.flatten_density.shape)
                 self.flattening_icdf.compute(self.flatten_density, "inverse")
+                self.flatten_ready = True
 
         # Rescale the goal_cdf
         if self.goal_cdf is not None:
@@ -460,7 +469,7 @@ class CPlaneGoal:
                 self._goal_drawer.lines = None
             else:
                 rays = self.driver.optical_system.finished_rays
-                start = rays[:, 3:6]
+                start = rays.s + rays.hat
                 if mode == "Projection":
                     end = self.project(rays)
                 elif mode == "Flatten":
@@ -503,12 +512,12 @@ class CPlaneGoal:
         # We don't need the full rays to perform this operation - just the end points.  So lets check if that
         # is what was fed.  If so, we don't want an offset.  Otherwise a full rayset was entered, which has
         # at least 7 elements, so we need an offset of 3 from the start to extract the end points.
-        if rays.shape[1] == 3:
-            offset = 0
-        else:
-            offset = 3
-        x = np.clip(rays[:, offset+self._slice_1], self._s1_clip_low, self._s1_clip_high)
-        y = np.clip(rays[:, offset+self._slice_2], self._s2_clip_low, self._s2_clip_high)
+        try:
+            rays = rays.s + rays.hat
+        except AttributeError:
+            rays = rays
+        x = np.clip(rays[:, self._slice_1], self._s1_clip_low, self._s1_clip_high)
+        y = np.clip(rays[:, self._slice_2], self._s2_clip_low, self._s2_clip_high)
         return np.stack((x, y), axis=1)
 
     def shift_to_goal_region(self, points):
@@ -551,6 +560,7 @@ class CPlaneGoal:
             density = self.flattening_icdf.histogram_points(proj)
             self.flattening_icdf.accumulate_density(density)
             self.flattening_icdf.compute(direction="inverse")
+            self.flatten_ready = True
             return density
         else:
             # Can just ignore the data.  This is a valid thing that can happen, because I do not want the tracing
@@ -565,6 +575,7 @@ class CPlaneGoal:
             except Exception:
                 pass
             self._actor = self.driver.plot.add_mesh(self._mesh, texture=self.goal_density_texture)
+            self._actor.SetVisibility(self.settings.visible)
 
     def load_goal_image(self, *args, init=False):
         # Need the *args to eat a parameter passed by the pyqt signal that calls this function whenever one of the
@@ -705,16 +716,11 @@ class CPlaneGoal:
             self.driver.optical_system.parts["auto_target"] = target
             self.driver.optical_system.targets.append(target)
 
-    def get_goal(self, ray_ends):
+    def get_goal(self, ray_ends, extra):
         if self.mode == "None":
             raise RuntimeError("Goal: Cannot call make_goal / use with an optimizer when in mode 'none'.")
         else:
             return self.expand(self.goal(self.flatten(self.project(ray_ends))))
-
-    def compute_error(self):
-        output = self.driver.optical_system.finished_rays[:, 3:6]
-        goal = tf.convert_to_tensor(self.get_goal(output), dtype=tf.float64)
-        return self.error_function(output, goal)
 
 
 class LineDrawer:
@@ -746,7 +752,7 @@ class LineDrawer:
                 cell_range[line_count:]
             ], axis=1).flatten()
 
-            self._mesh.points = np.concatenate((start.numpy(), end.numpy()), axis=0)
+            self._mesh.points = np.concatenate((start, end), axis=0)
             self._mesh.lines = cells
             self._actor.SetVisibility(True)
         except Exception:

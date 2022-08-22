@@ -107,12 +107,12 @@ class RayDrawer3D:
     def draw(self):
         """Redraw the pyvista actor controlled by this class."""
         if self.rays is not None:
-            all_points = np.concatenate((self.rays[:, :3], self.rays[:, 3:6]), axis=0)
+            all_points = np.concatenate((self.rays.s, self.rays.hat + self.rays.s), axis=0)
 
-            if all_points.shape[0] == 0:
+            if len(all_points) == 0:
                 self._actor.SetVisibility(False)
             else:
-                line_count = self.rays.shape[0]
+                line_count = self.rays.s.shape[0]
                 cell_range = np.arange(2 * line_count)
                 cells = np.stack([
                     2 * np.ones((line_count,), dtype=np.int32),
@@ -122,7 +122,7 @@ class RayDrawer3D:
 
                 self._mesh.points = all_points
                 self._mesh.lines = cells
-                self._mesh["wavelength"] = self.rays[:, 6]
+                self._mesh["wavelength"] = self.rays.wv.numpy()
                 self._actor.SetVisibility(True)
         else:
             # draw an empty ray set
@@ -246,76 +246,3 @@ class TriangleDrawer:
         self.plot.remove_actor(self._norm_actor)
         self.plot.remove_actor(self._parameter_actor)
         self.plot.remove_actor(self._actor)
-
-
-class GoalDrawer3D:
-    """
-    Class for visualizing the training goal in 3D, using pyvista.
-    
-    Accepts two sets of points, the resultant output from ray tracing and the optimization 
-    goal points, and draws arrows from the output to the goal.  Display can be turned on and 
-    off.
-    """
-    
-    def __init__(self, plot, visible=True):
-        """
-        plot : pyvista plot
-            The plot object to plot into
-        visible : bool, optional
-            The starting state of the visibility of the goal visualization
-        """
-        self.plot = plot
-        self.output = None
-        self.goal = None
-        self._arrows = None
-        self._visible = visible
-        
-    @property
-    def output(self):
-        return self._output
-        
-    @output.setter
-    def output(self, val):
-        if val is not None:
-            val = np.array(val)
-            if len(val.shape) != 2 or val.shape[1] != 3:
-                raise ValueError("GoalDrawer3D: output must have shape (None, 3).")
-        self._output = val
-        
-    @property
-    def goal(self):
-        return self._goal
-        
-    @goal.setter
-    def goal(self, val):
-        if val is not None:
-            val = np.array(val)
-            if len(val.shape) != 2 or val.shape[1] != 3:
-                raise ValueError("GoalDrawer3D: goal must have shape (None, 3).")
-        self._goal = val
-        
-    @property
-    def visible(self):
-        return self._visible
-        
-    @visible.setter
-    def visible(self, val):
-        if type(val) is bool:
-            self._visible = val
-            self.draw()
-        else:
-            raise ValueError("GoalDrawer3D: visible must be a bool.")
-            
-    def draw(self):
-        self.plot.remove_actor(self._arrows)
-        if self._output is not None and self._goal is not None:
-            if self._visible:
-                outputs = np.array(self._output)
-                goals = np.array(self._goal)
-                
-                points = pv.PolyData(outputs)
-                points.vectors = goals - outputs
-                self._arrows = self.plot.add_mesh(points.arrows, reset_camera=False)
-                    
-                return
-        self._arrows = None

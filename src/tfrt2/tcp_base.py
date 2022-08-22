@@ -41,6 +41,9 @@ SERVER_READY =       b"server ready    "
 SERVER_BUSY =        b"server busy     "
 SERVER_BUSY_WARN =   b"server busy warn"
 SERVER_FLATTENER =   b"server flattener"
+CLIENT_SINGLE_STEP = b"client one step "
+SERVER_SINGLE_STEP = b"server one step "
+SERVER_ST_UPDATE =   b"server st update"
 
 
 class InvalidHeaderError(ValueError):
