@@ -71,8 +71,8 @@ class OpticClientWindow(qtw.QWidget):
         self.trace_pane = TraceControls(self)
         self.parameters_pane = ParameterControls(self)
         self.components_pane = ComponentControls(self)
-        self.optimize_pane = OptimizationPane(self)
         self.remote_pane = RemotePane(self)
+        self.optimize_pane = OptimizationPane(self)
         self.ui.pane_stack = None
         self._quit = threading.Event()
         self.ui.retrace_button = qtw.QPushButton("Re-trace")

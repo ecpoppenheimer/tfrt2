@@ -157,6 +157,7 @@ class PerformanceTracer:
 
                 # Unlock the optical system / server
                 self.busy.clear()
+                self.purge_jobs()
                 self.abort.clear()
                 self.server.busy_signal.sig.emit(False)
 
@@ -165,6 +166,18 @@ class PerformanceTracer:
         while True:
             try:
                 self.job_queue.get(False)
+            except queue.Empty:
+                break
+
+    def purge_jobs(self):
+        while True:
+            try:
+                self._sub_job_queue.get(False)
+            except queue.Empty:
+                break
+        while True:
+            try:
+                self._result_queue.get(False)
             except queue.Empty:
                 break
 
@@ -333,11 +346,9 @@ class PerformanceTracer:
             try:
                 self._sub_job_queue.put((sub_job_key, source_ray_data), False)
                 pending_results += 1
-                print(f"just pushed a sub job.  pending results: {pending_results}")
                 traced_rays += source_rays.count
             except queue.Full:
                 cached_source_data = source_ray_data
-                print(f"queue full, caching source data")
                 init = False
 
             # Initially, (when init == True), lets continue here to fill up the sub_job_queue until it is totally full
@@ -354,11 +365,10 @@ class PerformanceTracer:
             # here.  But that means we need an extra loop to pull off the last results
             result = self._result_queue.get(True)
             pending_results -= 1
-            print(f"just got a result in phase 1.  Results: {pending_results}")
-            # If the result is an error, need to send the error message and return
+            # If the result is an error, need to send the error message and break out of the loop
             if isinstance(result, SubJobError):
                 self.nonfatal_error("Illuminance plot sub-job", result)
-                return
+                break
             if status_message is not None:
                 self.send_status_update(status_message, min(traced_rays, ray_count), ray_count)
             results.append(result)
@@ -370,37 +380,42 @@ class PerformanceTracer:
         # My initial design was to make this call not block and look for queue empty, but this won't work if results
         # get dequeued faster than they are produced (which will be typical).  So instead I have to count
         # pending requests to make sure they all get processed.
-        while pending_results > 0 and not self.abort.is_set():
+        # I initially had an and not abort.set() here, but can't.  This is the only place that knows how many results to
+        # expect.  Need to block here until each result has been pulled, else could abort while a worker is working,
+        # which could cause it to put its result up after we have aborted (and purged the result queue), which can
+        # cause a wrong kind of result to be delivered to an operation.
+        sent_result_error = False
+        while pending_results > 0:
             result = self._result_queue.get(True)
             pending_results -= 1
-            print(f"just got a result in phase 2.  Results: {pending_results}")
             # If the result is an error, need to send the error message and return
             if isinstance(result, SubJobError):
-                self.nonfatal_error("Illuminance plot sub-job", result)
-                return
-            if status_message is not None:
-                self.send_status_update(status_message, min(traced_rays, ray_count), ray_count)
-            results.append(result)
+                if not sent_result_error:
+                    self.nonfatal_error("Illuminance plot sub-job", result)
+                    sent_result_error = True
+            else:
+                if status_message is not None:
+                    self.send_status_update(status_message, min(traced_rays, ray_count), ray_count)
+                results.append(result)
 
         # If the loops above stopped because we aborted, then just return now
         if self.abort.is_set():
             return
 
-        print("finishing sub-job loop.")
         return results
 
     def _single_step(self, ray_count, ray_count_factor, display_sample_count, optimize_params, routine=False):
-        if routine:
-            status_message = None
-        else:
-            status_message = "Single Optimization Step."
-        if len(self.optical_system.parameters) == 0:
-            self.nonfatal_error("single step", "Optical system has no parameters.")
-            return
-        if self.optical_system.goal is None:
-            self.nonfatal_error("single step", "Optical system has no goal.")
-            return
         try:
+            if routine:
+                status_message = None
+            else:
+                status_message = "Single Optimization Step."
+            if len(self.optical_system.parameters) == 0:
+                self.nonfatal_error("single step", "Optical system has no parameters.")
+                return
+            if self.optical_system.goal is None:
+                self.nonfatal_error("single step", "Optical system has no goal.")
+                return
             # Perform the trace pre-compilation
             results = self._sub_job_management(
                 ray_count, ray_count_factor, "precompile_trace", status_message=status_message,
@@ -419,9 +434,11 @@ class PerformanceTracer:
             compiled_meta = []
             compiled_wv = []
             compiled_extra = []
+            compiled_finished_out = []
+
             for result in results:
                 try:
-                    source_rays, trig_map, tm_indices = result
+                    source_rays, trig_map, tm_indices, finished_out = result
                     if self.optical_system.goal.add_extra is None:
                         s, hat, n, meta, wv = source_rays
                     else:
@@ -434,6 +451,7 @@ class PerformanceTracer:
                     compiled_wv.append(wv)
                     compiled_trig_map.append(trig_map)
                     compiled_tm_indices.append(tm_indices)
+                    compiled_finished_out.append(finished_out)
                 except ValueError:
                     print(f"just got a bad result while compiling: {result}")
 
@@ -443,6 +461,7 @@ class PerformanceTracer:
             n = tf.concat(compiled_n, axis=0)
             wv = np.concatenate(compiled_wv, axis=0)
             meta = tf.concat(compiled_meta, axis=0)
+            output = tf.concat(compiled_finished_out, axis=0)
             if self.optical_system.goal.add_extra is None:
                 extra = tf.zeros((s.shape[0], 0), dtype=tf.float64)
             else:
@@ -454,8 +473,9 @@ class PerformanceTracer:
 
             # Run the optimization, and retrieve a sample of finished rays for display/debugging
             do_smooth, learning_rate, momentum, grad_clip_low, grad_clip_high = optimize_params
-            ray_sample = self.optical_system.optimize_step(
+            ray_sample, grad_stats = self.optical_system.optimize_step(
                 s, hat, n, meta, extra, trig_map, tm_indices,
+                output,
                 tf.convert_to_tensor(self.server.settings.trace_depth, dtype=tf.int32),
                 learning_rate,
                 momentum,
@@ -476,7 +496,7 @@ class PerformanceTracer:
             # Compile the new, updated parameters
             params = [p.numpy() for p in self.optical_system.parameters]
 
-            self.server.send_data(tcp.SERVER_SINGLE_STEP, pickle.dumps((finished_rays, params)))
+            self.server.send_data(tcp.SERVER_SINGLE_STEP, pickle.dumps((finished_rays, params, grad_stats)))
         except cdf.ComputeRequiredError:
             self.nonfatal_error(
                 "single step",
@@ -538,7 +558,7 @@ class Worker:
 
     def _precompile_trace(self, *source_data):
         with tf.device(self.device):
-            trig_map, trig_map_indices = engine.trace_sample_loop(
+            trig_map, trig_map_indices, finished_output = engine.trace_sample_loop(
                 *source_data[:4],
                 *self.prepped_data["boundary_data"],
                 self.prepped_data["trace_depth"],
@@ -547,7 +567,7 @@ class Worker:
                 self.prepped_data["ray_start_epsilon"],
                 self.prepped_data["new_ray_length"]
             )
-            return source_data, trig_map, trig_map_indices
+            return source_data, trig_map, trig_map_indices, finished_output
 
 
 class SubJobError:

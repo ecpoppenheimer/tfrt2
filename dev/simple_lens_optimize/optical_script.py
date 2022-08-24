@@ -1,3 +1,5 @@
+from math import pi
+
 import numpy as np
 import pyvista as pv
 import pathlib
@@ -41,61 +43,67 @@ class LocalSystem(OpticalSystem):
             mesh_output_path=str(pathlib.Path(self.self_path) / "exit_output.stl"),
         )
 
-        entrance_min_height = .005
-        entrance_max_height = .1
-        entrance_radius = .1
+        entrance_max_height = 2
+        exit_min_height = 2.2
+        radius = 1
+        target_edge_length = .05
 
-        def filter_fixed_entrance(vertices):
-            return np.sum((vertices**2)[:, :-1], axis=1) > (.98*entrance_radius) ** 2
+        zero_points = mt.circular_mesh(radius, target_edge_length)
+
+        def filter_quad_symmetry(vertices):
+            x, y = vertices[:, 0], vertices[:, 1]
+            theta = np.arctan2(y, x)
+            return np.logical_and(theta >= 0, theta <= pi/1.99)
+
+        def close(a, b, val=.001):
+            return np.abs(np.abs(a) - np.abs(b)) < val
+
+        def attach_quad_symmetry(vertex, available_vertices):
+            # want to match (x, y) to...  (-x, y), (x, -y), (-x, -y)
+            vx, vy = vertex[0], vertex[1]
+            avail_x, avail_y = available_vertices[:, 0], available_vertices[:, 1]
+            return np.logical_and(close(vx, avail_x), close(vy, avail_y))
 
         entrance = optics.ParametricTriangleOptic(
             self.driver,
             self.self_path,
             self.settings.entrance,
             vg.FromVectorVG((0.0, 0.0, 1.0)),
-            mesh=mt.circular_mesh(entrance_radius, .015),
+            mesh=zero_points,
             mat_in=1,
             mat_out=0,
-            filter_fixed=filter_fixed_entrance,
+            filter_drivers=filter_quad_symmetry,
+            attach_to_driver=attach_quad_symmetry,
             constraints=[
-                optics.ThicknessConstraint(self.settings.entrance, entrance_min_height, True),
-                optics.ClipConstraint(self.settings.entrance, entrance_min_height, entrance_max_height)
+                optics.ThicknessConstraint(self.settings.entrance, entrance_max_height, False),
             ],
             flip_norm=True
         )
-        #print(f"built entrance with {entrance.vertices.shape[0]} vertices and {entrance.faces.shape[0]} faces.")
-
-        exit_min_height = .15
-        exit_max_height = .6
-        exit_radius = .2
-
-        def filter_fixed_exit(vertices):
-            return np.sum((vertices ** 2)[:, :-1], axis=1) > (.98 * exit_radius) ** 2
 
         exit = optics.ParametricTriangleOptic(
             self.driver,
             self.self_path,
-            self.settings.exit,
+            self.settings.entrance,
             vg.FromVectorVG((0.0, 0.0, 1.0)),
-            mesh=mt.circular_mesh(exit_radius, .03),
+            mesh=zero_points,
             mat_in=1,
             mat_out=0,
-            filter_fixed=filter_fixed_exit,
+            filter_drivers=filter_quad_symmetry,
+            attach_to_driver=attach_quad_symmetry,
             constraints=[
-                optics.ThicknessConstraint(self.settings.exit, exit_min_height, False),
-                optics.ClipConstraint(self.settings.exit, exit_min_height, exit_max_height)
-            ]
+                optics.ThicknessConstraint(self.settings.exit, exit_min_height, True),
+            ],
         )
-        #print(f"built exit with {exit.vertices.shape[0]} vertices and {exit.faces.shape[0]} faces.")
 
         source = sources.Source3D(
             self.driver, self.self_path, self.settings.source, "",
             base_points=distributions.Square(self.settings.source, driver, x_width=.1, y_width=1),
-            angles=distributions.PerfectLambertianSphere(self.settings.source, driver)
+            aperture=distributions.PerfectCircle(self.settings.source, driver, radius, mode="aperture"),
+            aperture_distance=(entrance_max_height + exit_min_height) / 2
         )
 
         self.feed_parts(source=source, entrance=entrance, exit=exit)
 
         self.set_goal(CPlaneGoal(
-            self.driver, self.settings, "uniform", ('x', -1.0, 1.0), ('y', -1.0, 1.0), 5,
+            self.driver, self.settings, "uniform", ('x', -1.0, 1.0), ('y', -1.0, 1.0), 12,
         ))

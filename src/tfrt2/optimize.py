@@ -24,6 +24,7 @@ class OptimizationPane(qtw.QWidget):
             op_momentum=0.0,
             op_grad_clip_low=0.0,
             op_grad_clip_high=0.4,
+            op_illuminance_period=10,
         )
         self._running_continuous = False
         self.step_count = 0
@@ -106,7 +107,7 @@ class OptimizationPane(qtw.QWidget):
 
         # Learning rate and momentum
         main_layout.addWidget(cw.SettingsEntryBox(
-            self.parent_client.settings, "op_learning_rate", float, qtg.QDoubleValidator(0, 1e4, 6),
+            self.parent_client.settings, "op_learning_rate", float, qtg.QDoubleValidator(0, 1e4, 10),
             label="Learning rate"
         ), ui_row, 0, 1, 3)
         main_layout.addWidget(cw.SettingsEntryBox(
@@ -130,10 +131,26 @@ class OptimizationPane(qtw.QWidget):
         ), ui_row, 0, 1, 6)
         ui_row += 1
 
+        main_layout.addWidget(qtw.QLabel("Gradient statistics from optimizer:"), ui_row, 0, 1, 6)
+        ui_row += 1
+        grad_stats_pane = qtw.QWidget()
+        self.grad_stats_layout = qtw.QVBoxLayout()
+        grad_stats_pane.setLayout(self.grad_stats_layout)
+        self.grad_stats_units = {}
+        main_layout.addWidget(grad_stats_pane, ui_row, 0, 1, 6)
+        ui_row += 1
+
         # Smooth period
         main_layout.addWidget(cw.SettingsEntryBox(
             self.parent_client.settings, "op_smooth_period", int, qtg.QIntValidator(0, 100),
             label="Smoother Period (0 to disable smoothing)."
+        ), ui_row, 0, 1, 6)
+        ui_row += 1
+
+        # Illuminance Period
+        main_layout.addWidget(cw.SettingsEntryBox(
+            self.parent_client.settings, "op_illuminance_period", int, qtg.QIntValidator(0, 100),
+            label="Illuminance Period (0 to disable)."
         ), ui_row, 0, 1, 6)
         ui_row += 1
 
@@ -146,24 +163,26 @@ class OptimizationPane(qtw.QWidget):
         self.continuous_step_button = qtw.QPushButton("Continuous Run")
         self.continuous_step_button.clicked.connect(self.set_continuous_state)
         main_layout.addWidget(self.continuous_step_button, ui_row, 3, 1, 3)
-
         ui_row += 1
+
+        # Button to calculate illuminance, so I don't have to switch tabs
+        illuminance_button = qtw.QPushButton("Calculate Illuminance")
+        illuminance_button.clicked.connect(self.parent_client.remote_pane.request_illuminance_plot)
+        main_layout.addWidget(illuminance_button, ui_row, 0, 1, 3)
 
     def try_activate(self, socket=None):
         if socket is not None:
             self.server_socket = socket
         if self.parent_client.optical_system is None:
-            self.error_widget.setText("Load an optical system to optimize.")
-            self._deactivate()
+            self.deactivate("Load an optical system to optimize.")
         elif self.parent_client.optical_system.goal is None:
-            self.error_widget.setText("Optical system requires a goal to optimize.")
-            self._deactivate()
+            self.deactivate("Optical system requires a goal to optimize.")
         elif self.server_socket is None:
-            self.error_widget.setText("Connect to a trace server to optimize.")
-            self._deactivate()
+            self.deactivate("Connect to a trace server to optimize.")
         else:
             # are able to activate
             self._activate()
+            self.history_widget.enable_playback(False)
             self.history_widget.reset_history()
 
     def _activate(self):
@@ -171,27 +190,33 @@ class OptimizationPane(qtw.QWidget):
         self.error_widget.hide()
         self.active_widget.show()
 
-    def _deactivate(self):
-        self._active = True
-        self.error_widget.show()
-        self.active_widget.hide()
+        # Populate the grad stats
+        for component in self.parent_client.optical_system.parametric_optics:
+            label = qtw.QLabel(f"{component.name}. mean: ---, variance: ---")
+            self.grad_stats_units[component.name] = label
+            self.grad_stats_layout.addWidget(label)
 
-    def deactivate(self):
+    def deactivate(self, text="Connect to a trace server to optimize."):
         self.active_widget.hide()
         self.server_socket = None
-        self.error_widget.setText("Connect to a trace server to optimize.")
+        self.error_widget.setText(text)
         self.error_widget.show()
         self._active = False
+        self.history_widget.enable_playback(False)
+
+        # Remove the grad stats
+        for label in self.grad_stats_units.values():
+            label.deleteLater()
+        self.grad_stats_units = {}
 
     def single_step(self):
         # Check to see if we need to calculate the illuminance first
-        # TODO ray display gets ruined after a single step
         if not self.parent_client.optical_system.goal.flatten_ready:
             self.parent_client.remote_pane.request_illuminance_plot()
 
         self.parent_client.tcp_widget.set_status("Single Optimization Step.", 0, 1)
-        if self.parent_client.settings.op_smooth_period > 0.0:
-            do_smooth = True
+        if self.parent_client.settings.op_smooth_period > 0:
+            do_smooth = self.step_count % self.parent_client.settings.op_smooth_period == 0
         else:
             do_smooth = False
         optimize_params = (
@@ -212,8 +237,9 @@ class OptimizationPane(qtw.QWidget):
         )
 
     def receive_single_step(self, data):
-        finished_rays, new_params = pickle.loads(data)
+        finished_rays, new_params, grad_stats = pickle.loads(data)
 
+        # Update the display.  Updates both the mesh display and the rays.
         if self.parent_client.settings.op_update_on_step_result and not self.history_widget.override_redraw:
             for component, p in zip(self.parent_client.optical_system.parametric_optics, new_params):
                 component.param_assign(p)
@@ -223,9 +249,17 @@ class OptimizationPane(qtw.QWidget):
             self.parent_client.display_pane.redraw()
             self.parent_client.trace_pane.redraw()
 
+        # Update the grad stats
+        for name, mean, variance in grad_stats:
+            self.grad_stats_units[name].setText(f"{name}. mean: {mean:.4f}, variance: {variance:.4f}")
+
+        # Possibly queue the next step
         self.history_widget.add_history(new_params)
         self.increment_step()
         if self._running_continuous:
+            if self.step_count % self.parent_client.settings.op_illuminance_period == 0:
+                self.parent_client.remote_pane.request_illuminance_plot()
+
             self.single_step()
 
     def set_continuous_state(self, _=None, state=None):
@@ -259,7 +293,7 @@ class ParameterHistoryWidget(qtw.QWidget):
         self.parameter_history = []
         self.system = None
         self.override_redraw = False
-        self._animation_frame = 0
+        self._animation_frame_number = None
 
         self.parent_client.settings.establish_defaults(
             ph_fps=2,
@@ -302,11 +336,31 @@ class ParameterHistoryWidget(qtw.QWidget):
         ui_row += 1
 
         main_layout.addWidget(cw.SettingsEntryBox(
-            self.parent_client.settings, "ph_start_frame", int, qtg.QIntValidator(-100000, 100000)
-        ), ui_row, 0, 1, 3)
+            self.parent_client.settings, "ph_start_frame", int, qtg.QIntValidator(-10000, 10000), label="Start"
+        ), ui_row, 0, 1, 2)
         main_layout.addWidget(cw.SettingsEntryBox(
-            self.parent_client.settings, "ph_end_frame", int, qtg.QIntValidator(-100000, 100000)
-        ), ui_row, 3, 1, 3)
+            self.parent_client.settings, "ph_end_frame", int, qtg.QIntValidator(-10000, 10000), label="End"
+        ), ui_row, 2, 1, 2)
+
+        main_layout.addWidget(qtw.QLabel("Current"), ui_row, 4, 1, 1)
+        self.current_frame_box = qtw.QLineEdit("0")
+        self.current_frame_box.setValidator(qtg.QIntValidator(0, 10000))
+        self.current_frame_box.editingFinished.connect(self.set_current_frame)
+        main_layout.addWidget(self.current_frame_box, ui_row, 5, 1, 1)
+        ui_row += 1
+
+        self.play_button = qtw.QPushButton("Play")
+        self.play_button.clicked.connect(self.toggle_play)
+        main_layout.addWidget(self.play_button, ui_row, 0, 1, 2)
+
+        self.loop_check_box = qtw.QCheckBox("Loop")
+        self.loop_check_box.setTristate(False)
+        self.loop_check_box.setCheckState(2)
+        main_layout.addWidget(self.loop_check_box, ui_row, 2, 1, 4)
+
+        main_layout.addWidget(cw.SettingsEntryBox(
+            self.parent_client.settings, "ph_fps", float, qtg.QDoubleValidator(.1, 100, 3), label="FPS"
+        ), ui_row, 4, 1, 2)
         ui_row += 1
 
     def add_history(self, data):
@@ -331,7 +385,7 @@ class ParameterHistoryWidget(qtw.QWidget):
 
     def load(self):
         if self.parent_client.optical_system is None:
-            print("Cannot save, no optical system is present")
+            print("Cannot load, no optical system is present")
             return
         selected_file, _ = qtw.QFileDialog.getOpenFileName(
             directory=str(self.parent_client.settings.system_path), filter="*.dat"
@@ -349,7 +403,8 @@ class ParameterHistoryWidget(qtw.QWidget):
                     )
                     return
             self.parameter_history = p_history
-            print(f"just loaded some history: {len(self.parameter_history)}")
+            self.parent_client.optimize_pane.step_count = len(self.parameter_history)
+            self.parent_client.optimize_pane.step_label.setText(f"Step: {self.parent_client.optimize_pane.step_count}")
 
     def get_system_spec(self):
         return tuple(
@@ -362,19 +417,80 @@ class ParameterHistoryWidget(qtw.QWidget):
 
     def enable_playback(self, state):
         if state:
+            self.override_redraw = True
             self._playback.set()
+            self.play_button.setText("Stop")
         else:
+            self.override_redraw = False
             self._playback.clear()
+            self.play_button.setText("Play")
+
+    def toggle_play(self):
+        if self._playback.is_set():
+            self.enable_playback(False)
+        else:
+            self._animation_frame_number = None
+            self.enable_playback(True)
 
     def reset(self):
         self.enable_playback(False)
+        self._animation_frame_number = None
 
     def _animate_loop(self):
         while not self._shutdown.is_set():
             self._playback.wait()
-            print("frame")
+            self._animate_frame()
             if self.parent_client.settings.ph_fps == 0:
                 delay = 1
             else:
                 delay = 1/self.parent_client.settings.ph_fps
             time.sleep(delay)
+
+    def _animate_frame(self):
+        # Parse the animation frame number.  May be invalid, or may be negative, in which case it is relative to
+        # the end of the list.  Either way, ensure it is relative to the start of the list, and non-negative
+        if len(self.parameter_history) == 0:
+            print("No parameter history to animate")
+            self.enable_playback(False)
+            return
+
+        if self._animation_frame_number is None:
+            self._animation_frame_number = self.parent_client.settings.ph_start_frame
+            if self._animation_frame_number < 0:
+                self._animation_frame_number += len(self.parameter_history)
+            self._animation_frame_number = np.clip(self._animation_frame_number, 0, len(self.parameter_history) - 1)
+
+        # Do the current frame
+        self._show_frame(self._animation_frame_number)
+
+        # Check whether we have reached the end, in which case we need to either stop or loop.
+        end_frame = self.parent_client.settings.ph_end_frame
+        if end_frame < 0:
+            end_frame += len(self.parameter_history)
+        end_frame = np.clip(end_frame, 0, len(self.parameter_history) - 1)
+        if end_frame == 0:
+            end_frame = len(self.parameter_history) - 1
+
+        self._animation_frame_number += 1
+        if self._animation_frame_number > end_frame:
+            # At the end of the animation
+            self._animation_frame_number = None
+            if not self.loop_check_box.checkState():
+                self.enable_playback(False)
+
+    def set_current_frame(self):
+        current = int(self.current_frame_box.text())
+        if current < len(self.parameter_history) - 1:
+            self._animation_frame_number = current
+            self.current_frame_box.setStyleSheet("QLineEdit { background-color: white}")
+            self._show_frame(self._animation_frame_number)
+        else:
+            self.current_frame_box.setStyleSheet("QLineEdit { background-color: pink}")
+
+    def _show_frame(self, frame):
+        self.current_frame_box.setText(str(frame))
+        params = self.parameter_history[frame]
+        for component, p in zip(self.parent_client.optical_system.parametric_optics, params):
+            component.param_assign(p)
+        self.parent_client.optical_system.update_optics()
+        self.parent_client.display_pane.redraw()

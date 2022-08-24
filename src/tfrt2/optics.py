@@ -295,7 +295,9 @@ class ParametricTriangleOptic(TriangleOptic):
         self.initials = None
         self.any_fixed = False
         self.any_driven = False
-        self.driver_indices = None
+        self.driver_indices = np.zeros((0,), dtype=np.int32)
+        self.driven_indices = np.zeros((0,), dtype=np.int32)
+        self.fixed_indices = np.zeros((0,), dtype=np.int32)
         self.full_params = False
         self._qt_compat = qt_compat
         self._d_mat = None
@@ -338,6 +340,7 @@ class ParametricTriangleOptic(TriangleOptic):
         all_indices = np.arange(mesh.points.shape[0])
         available_indices = all_indices.copy()
         drivens_driver = {}
+        driven_indices = set()
 
         if hasattr(self, "filter_fixed"):
             fixed_mask = self.filter_fixed(mesh.points)
@@ -346,19 +349,19 @@ class ParametricTriangleOptic(TriangleOptic):
         else:
             fixed_indices = []
 
-        if hasattr(self, "filter_drivers"):
+        if hasattr(self, "filter_drivers") and hasattr(self, "attach_to_driver"):
             driver_mask = self.filter_drivers(mesh.points[available_indices])
             driver_indices = available_indices[driver_mask]
             available_indices = available_indices[np.logical_not(driver_mask)]
 
-            if hasattr(self, "attach_to_driver"):
-                available_indices = set(available_indices)
-                for driver in driver_indices:
-                    attached_indices = all_indices[self.attach_to_driver(mesh.points[driver], mesh.points)]
-                    attached_indices = set(attached_indices) & available_indices
-                    available_indices -= attached_indices
-                    for each in attached_indices:
-                        drivens_driver[each] = driver
+            available_indices = set(available_indices)
+            for driver in driver_indices:
+                attached_indices = all_indices[self.attach_to_driver(mesh.points[driver], mesh.points)]
+                attached_indices = set(attached_indices) & available_indices
+                available_indices -= attached_indices
+                driven_indices |= attached_indices
+                for each in attached_indices:
+                    drivens_driver[each] = driver
 
             # any indices still in available_indices are left over, and need to be added to driver_indices
             driver_indices = np.concatenate((driver_indices, np.array(list(available_indices), dtype=np.int32)))
@@ -375,6 +378,9 @@ class ParametricTriangleOptic(TriangleOptic):
         # driver_indices are indices of vertices that will get an attached parameter
         # drivens_driver is a dict whose keys are indices of driven vertices and whose value is the index of the
         # driver to controll this driven vertex.
+        self.driver_indices = np.array(driver_indices)
+        self.driven_indices = np.array(list(driven_indices))
+        self.fixed_indices = np.array(fixed_indices)
 
         # set some state variables, so we can avoid doing unnecessary gathers if we don't need to
         self.any_fixed = len(fixed_indices) > 0
@@ -383,7 +389,6 @@ class ParametricTriangleOptic(TriangleOptic):
             self.full_params = False
         else:
             self.full_params = True
-        self.driver_indices = driver_indices
 
         self.movable_indices = np.setdiff1d(np.arange(mesh.points.shape[0]), fixed_indices)
         movable_count = len(self.movable_indices)
@@ -592,7 +597,7 @@ class ParametricTriangleOptic(TriangleOptic):
         smoother /= tf.reshape(tf.reduce_sum(smoother, axis=1), (-1, 1))
         return smoother
 
-    def smooth(self, smoother):
+    def smooth(self, smoother=None):
         if smoother is None:
             smoother = self.smoother
         if smoother is not None:
@@ -622,6 +627,8 @@ class TrigBoundaryDisplayController(qtw.QWidget):
         self.component = component
         self._permit_draws = False
         self._params_valid = hasattr(self.component, "parameters")
+        self.plot = plot
+        self._driving_labels_actors = []
 
         # define the default display settings for this component
         if self._params_valid:
@@ -678,6 +685,8 @@ class TrigBoundaryDisplayController(qtw.QWidget):
         if self._params_valid:
             self.build_check_box(main_layout, 6, "parameter_arrow_visibility")
             self.build_entry_box(main_layout, 7, "parameter_arrow_length", float, qtg.QDoubleValidator(0, 1e6, 5))
+            self.component.settings.establish_defaults(show_driving_labels=False)
+            self.build_check_box(main_layout, 8, "show_driving_labels", extra_callback=self.click_driving_labels)
 
         self._permit_draws = True
 
@@ -701,6 +710,9 @@ class TrigBoundaryDisplayController(qtw.QWidget):
 
     def remove_drawer(self):
         self.drawer.delete()
+        for each in self._driving_labels_actors:
+            self.plot.remove_actor(each)
+        self._driving_labels_actors = []
 
     def build_check_box(self, main_layout, layout_index, name, extra_callback=None):
         main_layout.addWidget(qtw.QLabel(str(name).replace("_", " ")), layout_index, 0)
@@ -736,6 +748,25 @@ class TrigBoundaryDisplayController(qtw.QWidget):
         callback()
         widget.editingFinished.connect(callback)
         main_layout.addWidget(widget, layout_index, 1)
+
+    def click_driving_labels(self):
+        if self.component.settings.show_driving_labels:
+            if self.component.driver_indices.shape[0] > 0:
+                mesh = pv.PolyData(self.component.vertices.numpy()[self.component.driver_indices])
+                actor = self.plot.add_mesh(mesh, render_points_as_spheres=True, color="green", point_size=10.0)
+                self._driving_labels_actors.append(actor)
+            if self.component.driven_indices.shape[0] > 0:
+                mesh = pv.PolyData(self.component.vertices.numpy()[self.component.driven_indices])
+                actor = self.plot.add_mesh(mesh, render_points_as_spheres=True, color="yellow", point_size=10.0)
+                self._driving_labels_actors.append(actor)
+            if self.component.fixed_indices.shape[0] > 0:
+                mesh = pv.PolyData(self.component.vertices.numpy()[self.component.fixed_indices])
+                actor = self.plot.add_mesh(mesh, render_points_as_spheres=True, color="red", point_size=10.0)
+                self._driving_labels_actors.append(actor)
+        else:
+            for each in self._driving_labels_actors:
+                self.plot.remove_actor(each)
+            self._driving_labels_actors = []
 
 
 class ClipConstraint(qtw.QWidget):

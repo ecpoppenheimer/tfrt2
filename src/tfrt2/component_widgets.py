@@ -640,7 +640,7 @@ class ParameterController(qtw.QWidget):
         self.component.smoother = self.component.get_smoother(self.component.settings.smooth_stddev)
 
     def test_smoother(self):
-        self.component.smooth(None)
+        self.component.smooth()
         self.update_everything()
 
 

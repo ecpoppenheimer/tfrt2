@@ -224,6 +224,8 @@ class TraceServer(qtn.QTcpServer):
                 # because settings.load creates whole new dictionaries.  Need to keep the dictionaries and
                 # update them instead.
                 self.optical_system.settings.reload(str(self.temp_path / "settings.data"))
+                for component in self.optical_system.parametric_optics:
+                    component.smoother = component.get_smoother(component.settings.smooth_stddev)
 
             # My initial intuition was to only run this code in the else clause above, but it may need to be run always
             # because I am finding that the system is only ever loading the default spectrum, though it can load a
@@ -317,7 +319,7 @@ class TraceServer(qtn.QTcpServer):
         # Settings will either have 8 elements (for an override) or just one, the ray_count_factor
         if len(settings) == 1:
             settings = (
-                self.optical_system.settings.goal.flattener_ray_requirement,
+                self.settings.rq_illum_ray_count,
                 settings[0],
                 *(None,) * 6,
                 False

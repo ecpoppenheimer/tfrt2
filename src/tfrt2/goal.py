@@ -163,7 +163,8 @@ class CPlaneGoal:
         self.settings = system_settings.goal
         self.settings.establish_defaults(
             c1=c1[0], c1_min=c1[1], c1_max=c1[2], c2=c2[0], c2_min=c2[1], c2_max=c2[2], visible=True,
-            c3_offset=c3_offset, f_c1_res=64, f_c2_res=64, goal_color="#FFFFFF", flattener_ray_requirement=int(1e4)
+            c3_offset=c3_offset, f_c1_res=64, f_c2_res=64, goal_color="#FFFFFF", c1_clip_min=c1[1], c1_clip_max=c1[2],
+            c2_clip_min=c2[1], c2_clip_max=c2[2]
         )
         self.auto_target = auto_target
         self.auto_far_edge_distance = auto_far_edge_distance
@@ -277,6 +278,11 @@ class CPlaneGoal:
             callback=self.refresh_from_settings
         ), self.ui_row, 2, 1, 4)
         self.ui_row += 1
+        main_layout.addWidget(cw.SettingsRangeBox(
+            self.settings, "Clipping limits", "c1_clip_min", "c1_clip_max", float,
+            validator=qtg.QDoubleValidator(-1e6, 1e6, 8), callback=self.refresh_from_settings
+        ), self.ui_row, 0, 1, 6)
+        self.ui_row += 1
 
         main_layout.addWidget(qtw.QLabel("Second coordinate axis"), self.ui_row, 0, 1, 6)
         self.ui_row += 1
@@ -290,6 +296,11 @@ class CPlaneGoal:
             self.settings, "", "c2_min", "c2_max", float, validator=qtg.QDoubleValidator(-1e6, 1e6, 8),
             callback=self.refresh_from_settings
         ), self.ui_row, 2, 1, 4)
+        self.ui_row += 1
+        main_layout.addWidget(cw.SettingsRangeBox(
+            self.settings, "Clipping limits", "c2_clip_min", "c2_clip_max", float, validator=qtg.QDoubleValidator(-1e6, 1e6, 8),
+            callback=self.refresh_from_settings
+        ), self.ui_row, 0, 1, 6)
         self.ui_row += 1
 
         main_layout.addWidget(cw.SettingsEntryBox(
@@ -305,10 +316,6 @@ class CPlaneGoal:
 
         # Resolution of the flattening icdf.  Optional, because this will not exist for all modes
         if self.flattening_icdf is not None:
-            main_layout.addWidget(cw.SettingsEntryBox(
-                self.settings, "flattener_ray_requirement", int, validator=qtg.QIntValidator(int(1e4), int(1e9)),
-                label="Minimum rays required for flattener"
-            ), self.ui_row, 0, 1, 6)
             self.ui_row += 1
             main_layout.addWidget(cw.SettingsEntryBox(
                 self.settings, "f_c1_res", int, validator=qtg.QIntValidator(1, int(1e6)),
@@ -406,10 +413,14 @@ class CPlaneGoal:
         # Slicing and projection constants, that will move the 3D finished ray points into the 2D plane of the goal.
         self._slice_1 = tf.constant(a1, dtype=tf.int32)
         self._slice_2 = tf.constant(a2, dtype=tf.int32)
-        self._s1_clip_low = tf.constant(self.settings.c1_min, dtype=tf.float64)
+        """self._s1_clip_low = tf.constant(self.settings.c1_min, dtype=tf.float64)
         self._s1_clip_high = tf.constant(self.settings.c1_max, dtype=tf.float64)
         self._s2_clip_low = tf.constant(self.settings.c2_min, dtype=tf.float64)
-        self._s2_clip_high = tf.constant(self.settings.c2_max, dtype=tf.float64)
+        self._s2_clip_high = tf.constant(self.settings.c2_max, dtype=tf.float64)""" #TODO remove after testing
+        self._s1_clip_low = tf.constant(self.settings.c1_clip_min, dtype=tf.float64)
+        self._s1_clip_high = tf.constant(self.settings.c1_clip_max, dtype=tf.float64)
+        self._s2_clip_low = tf.constant(self.settings.c2_clip_min, dtype=tf.float64)
+        self._s2_clip_high = tf.constant(self.settings.c2_clip_max, dtype=tf.float64)
 
         self._s3_offset = tf.constant(self.settings.c3_offset, dtype=tf.float64)
 
@@ -429,10 +440,10 @@ class CPlaneGoal:
         # Adjust the flattening icdf parameters, if it exists
         if self.flattening_icdf is not None:
             self.flattening_icdf.clear_density()
-            self.flattening_icdf.x_min = self.settings.c1_min
-            self.flattening_icdf.x_max = self.settings.c1_max
-            self.flattening_icdf.y_min = self.settings.c2_min
-            self.flattening_icdf.y_max = self.settings.c2_max
+            self.flattening_icdf.x_min = self.settings.c1_clip_min
+            self.flattening_icdf.x_max = self.settings.c1_clip_max
+            self.flattening_icdf.y_min = self.settings.c2_clip_min
+            self.flattening_icdf.y_max = self.settings.c2_clip_max
             if self.flatten_density is not None:
                 self.flattening_icdf.set_resolution(*self.flatten_density.shape)
                 self.flattening_icdf.compute(self.flatten_density, "inverse")
