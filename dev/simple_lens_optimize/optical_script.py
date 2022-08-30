@@ -49,6 +49,9 @@ class LocalSystem(OpticalSystem):
         target_edge_length = .05
 
         zero_points = mt.circular_mesh(radius, target_edge_length)
+        print(
+            f"zero points has {zero_points.points.shape[0]} vertices and {zero_points.faces.shape[0]/4} faces."
+        )
 
         def filter_quad_symmetry(vertices):
             x, y = vertices[:, 0], vertices[:, 1]
@@ -83,7 +86,7 @@ class LocalSystem(OpticalSystem):
         exit = optics.ParametricTriangleOptic(
             self.driver,
             self.self_path,
-            self.settings.entrance,
+            self.settings.exit,
             vg.FromVectorVG((0.0, 0.0, 1.0)),
             mesh=zero_points,
             mat_in=1,

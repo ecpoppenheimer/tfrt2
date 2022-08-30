@@ -3,6 +3,7 @@ Various useful mesh processing functions.
 """
 import math
 import itertools
+import time
 
 import numpy as np
 import tensorflow as tf
@@ -124,6 +125,27 @@ def cosine_acum(origin, vertices):
         accumulator[:, i] = np_projection(origin - vertices[i], vertices - vertices[i]) < -.85
     accumulator = np.logical_or(accumulator, np.eye(size, dtype=np.bool))
     return tf.constant(accumulator, dtype=tf.float64)
+
+
+def mesh_distance_matrix(mesh):
+    """
+    Return a matrix that holds the distance between any two points in a pyvista mesh.
+    """
+    p1 = tf.expand_dims(mesh.points, 0)
+    p2 = tf.expand_dims(mesh.points, 1)
+    return tf.math.reduce_euclidean_norm(p1 - p2, axis=-1)
+
+
+def mesh_neighbor_table(mesh):
+    """
+    Return an array of points adjacent to each point in a pyvista mesh.
+    """
+    neighbors = [set() for _ in range(mesh.points.shape[0])]
+    faces = unpack_faces(mesh.faces)
+    for face in faces:
+        for i, j, k in ((0, 1, 2), (1, 2, 0), (2, 0, 1)):
+            neighbors[face[i]] |= {face[j], face[k]}
+    return neighbors
 
 
 # ======================================================================================================================

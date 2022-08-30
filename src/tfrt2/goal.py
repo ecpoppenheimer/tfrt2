@@ -713,6 +713,7 @@ class CPlaneGoal:
 
         try:
             self.driver.optical_system.parts["auto_target"].from_mesh(pv.Cube(bounds=bounds).triangulate())
+            self.driver.optical_system.parts["auto_target"].update()
             self.driver.optical_system.parts["auto_target"].drawer.draw()
         except KeyError:
             self.driver.optical_system.settings.establish_defaults(auto_target=Settings())
@@ -721,7 +722,7 @@ class CPlaneGoal:
             )
             target = TriangleOptic(
                 self.driver, self.driver.settings.system_path, self.driver.optical_system.settings.auto_target,
-                mesh=pv.Cube(bounds=bounds).triangulate()
+                mesh=pv.Cube(bounds=bounds).triangulate(), suppress_ui=True
             )
             target.name = "auto_target"
             self.driver.optical_system.parts["auto_target"] = target

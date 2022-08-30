@@ -1,6 +1,7 @@
 import traceback
 import pathlib
 import pickle
+import math
 
 import PyQt5.QtWidgets as qtw
 import PyQt5.QtGui as qtg
@@ -335,6 +336,34 @@ class ColorEntryButton(qtw.QPushButton):
         self.callback()
 
 
+class DelayedSlider(qtw.QSlider):
+    def __init__(self, orientation=qtc.Qt.Orientation.Horizontal, time_delay=.05):
+        super().__init__(orientation)
+
+        self._time_delay_ms = int(time_delay * 1000)
+        self._has_time_deferred_call = False
+        self._timer = qtc.QTimer()
+
+        self.valueChanged.connect(self._emit_value_changed)
+        self.valueChanged = DelayedSliderValueChanged()
+
+    def _emit_value_changed(self):
+        if not self._has_time_deferred_call:
+            self._has_time_deferred_call = True
+            self._timer.singleShot(self._time_delay_ms, self._emit_timed_value_changed)
+
+    def _emit_timed_value_changed(self):
+        self._has_time_deferred_call = False
+        self.valueChanged.sig.emit(self.value())
+
+
+class DelayedSliderValueChanged(qtc.QObject):
+    sig = qtc.pyqtSignal(int)
+
+    def connect(self, *args):
+        self.sig.connect(*args)
+
+
 # ======================================================================================================================
 
 
@@ -642,269 +671,3 @@ class ParameterController(qtw.QWidget):
     def test_smoother(self):
         self.component.smooth()
         self.update_everything()
-
-
-class OpticController(qtw.QWidget):
-    def __init__(self, component, driver, system_path):
-        """
-        It is the responsibility of the user to establish default settings.
-
-        Always required for a controller driven optic:
-            mesh_output_path
-        If this is a parametric optic, requires:
-            zero_points_input_path
-            parameters_path
-        If a mesh was not specified to the component constructor:
-            mesh_input_path
-
-        Parameters
-        ----------
-        component : optics.OpticBase
-            The optic to associate this controller with
-        """
-        super().__init__()
-        self.component = component
-        self.driver = driver
-        self._params_valid = hasattr(self.component, "parameters")
-        settings_keys = set(self.component.settings.dict.keys())
-        self._input_valid = "mesh_input_path" in settings_keys
-        self._output_valid = "mesh_output_path" in settings_keys
-
-        # build the UI elements
-        main_layout = qtw.QVBoxLayout()
-        main_layout.setContentsMargins(11, 11, 0, 11)
-        self.setLayout(main_layout)
-
-        if self._output_valid:
-            main_layout.addWidget(qtw.QLabel("Mesh Output"))
-            main_layout.addWidget(SettingsFileBox(
-                self.component.settings, "mesh_output_path", system_path, "*.stl", "save", self.save_mesh
-            ))
-        if self._params_valid:
-            self.component.settings.establish_defaults(
-                parameters_path=str(pathlib.Path(system_path) / "parameters.dat")
-            )
-            main_layout.addWidget(qtw.QLabel("Parameters"))
-            main_layout.addWidget(SettingsFileBox(
-                self.component.settings, "parameters_path", system_path, "*.dat", "both",
-                self.save_parameters, self.load_parameters
-            ))
-        if self._input_valid:
-            main_layout.addWidget(qtw.QLabel("Mesh Input"))
-            main_layout.addWidget(SettingsFileBox(
-                self.component.settings, "mesh_input_path", system_path, "*.stl", "load", self.load_mesh
-            ))
-        if self._output_valid and self._params_valid:
-            save_all_button = qtw.QPushButton("Save Everything")
-            save_all_button.clicked.connect(self.save_all)
-            main_layout.addWidget(save_all_button)
-
-        # !!!!!!!!!!!!! this has to be moved to a generally re-parametrizable optic.
-        """if self._params_valid:
-            main_layout.addWidget(SettingsEntryBox(
-                self.component.settings,
-                "parameter_count",
-                int,
-                qtg.QIntValidator(5, 1000),
-                [self.component.remesh, self.component.update]
-            ))"""
-
-    def save_mesh(self):
-        if self._output_valid:
-            self.component.save(self.component.settings.mesh_output_path)
-            print(f"saved mesh for {self.component.name}: {self.component.settings.mesh_output_path}")
-
-    def load_zero_points(self):
-        if self._input_valid:
-            self.component.load(self.component.settings.mesh_input_path)
-            self.driver.update_optics()
-            self.driver.try_auto_redraw()
-            print(f"loaded mesh for {self.component.name}: {self.component.settings.mesh_input_path}")
-
-    def save_parameters(self):
-        if self._params_valid:
-            try:
-                with open(self.component.settings.parameters_path, 'wb') as outFile:
-                    pickle.dump((
-                        self.component.parameters.numpy()
-                    ), outFile)
-                print(f"saved parameters for {self.component.name}: {self.component.settings.parameters_path}")
-            except Exception:
-                print(f"Exception while trying to save parameters")
-                print(traceback.format_exc())
-
-    def load_parameters(self):
-        if self._params_valid:
-            try:
-                with open(self.component.settings.parameters_path, 'rb') as inFile:
-                    params = pickle.load(inFile)
-                    self.component.param_assign(params)
-                print(f"loaded parameters for {self.component.name}: {self.component.settings.parameters_path}")
-                self.driver.update_optics()
-                self.driver.redraw()
-                if self.driver is not None:
-                    self.driver.parameters_pane.refresh_parameters()
-            except Exception:
-                print(f"Exception while trying to load parameters")
-                print(traceback.format_exc())
-
-    def load_mesh(self):
-        if self._input_valid:
-            self.component.load(self.component.settings.mesh_input_path)
-            self.driver.update_optics()
-            self.driver.redraw()
-            try:
-                self.component.drawer.draw()
-            except Exception:
-                pass
-            print(f"loaded mesh for {self.component.name}: {self.component.settings.mesh_input_path}")
-
-    def save_all(self):
-        # These functions already check whether their operation is valid, and silently do nothing if it isn't
-        self.save_mesh()
-        self.save_parameters()
-
-
-class MeshTricksController(qtw.QWidget):
-    def __init__(self, component, client):
-        """
-        Controller widget that controls the display and generation of the mesh tricks.  This widget establishes
-        its needed defaults.
-
-        Parameters
-        ----------
-        component : optics.ParametricTriangleOptic
-            The component to control with this controller
-        """
-        super().__init__()
-        self.component = component
-        self.client = client
-
-        # Build the UI elements
-        main_layout = qtw.QGridLayout()
-        main_layout.setContentsMargins(11, 11, 0, 11)
-        self.setLayout(main_layout)
-
-        # Set up the vum origin
-        if self.component.enable_vum:
-            self.component.settings.establish_defaults(vum_origin=[0.0, 0.0, 0.0])
-            self.vum_origin_mesh = pv.PolyData(np.array(self.component.settings.vum_origin))
-            self.vum_origin_actor = self.client.plot.add_mesh(
-                self.vum_origin_mesh, render_points_as_spheres=True, color="red", point_size=15.0
-            )
-
-            main_layout.addWidget(
-                SettingsVectorBox(
-                    self.component.settings,
-                    "VUM Origin",
-                    "vum_origin",
-                    [self.update_vum_origin_display, self.component.try_mesh_tools]
-                ), 0, 0, 1, 2
-            )
-            self.component.settings.establish_defaults(vum_origin_visible=False)
-            main_layout.addWidget(
-                SettingsCheckBox(
-                    self.component.settings, "vum_origin_visible", "Show vum origin", self.toggle_vum_origin_display
-                ), 2, 1, 1, 1
-            )
-            self.toggle_vum_origin_display(self.component.settings.vum_origin_visible)
-
-        # Set up the acum origin
-        if self.component.enable_accumulator:
-            self.component.settings.establish_defaults(accumulator_origin=[0.0, 0.0, 0.0])
-            self.acum_origin_mesh = pv.PolyData(np.array(self.component.settings.accumulator_origin))
-            self.acum_origin_actor = self.client.plot.add_mesh(
-                self.acum_origin_mesh, render_points_as_spheres=True, color="red", point_size=15.0
-            )
-
-            main_layout.addWidget(
-                SettingsVectorBox(
-                    self.component.settings,
-                    "Acum Origin",
-                    "accumulator_origin",
-                    [self.update_acum_origin_display, self.component.try_mesh_tools]
-                ), 1, 0, 1, 2
-            )
-            self.component.settings.establish_defaults(acum_origin_visible=False)
-            main_layout.addWidget(
-                SettingsCheckBox(
-                    self.component.settings, "acum_origin_visible", "Show accumulator origin", self.toggle_acum_origin_display
-                ), 2, 0, 1, 1
-            )
-            self.toggle_acum_origin_display(self.component.settings.acum_origin_visible)
-
-        # Set up the vertex update map
-        if self.component.enable_vum:
-            self.component.settings.establish_defaults(vum_active=True)
-            self.component.settings.establish_defaults(vum_visible=False)
-            main_layout.addWidget(
-                SettingsCheckBox(self.component.settings, "vum_active", "VUM Active"),
-                3, 1, 1, 1
-            )
-            main_layout.addWidget(
-                SettingsCheckBox(self.component.settings, "vum_visible", "VUM Visible", self.update_vum_display),
-                4, 1, 1, 1
-            )
-        else:
-            self.component.settings.establish_defaults(vum_active=False)
-            self.component.settings.establish_defaults(vum_visible=False)
-        self.vum_actor = None
-
-        # Set up the accumulator
-        if self.component.enable_accumulator:
-            self.component.settings.establish_defaults(accumulator_active=True)
-            main_layout.addWidget(
-                SettingsCheckBox(self.component.settings, "accumulator_active", "Accumulator Active"),
-                3, 0, 1, 1
-            )
-        else:
-            self.component.settings.establish_defaults(accumulator_active=False)
-
-    def toggle_vum_origin_display(self, active):
-        self.vum_origin_actor.SetVisibility(bool(active))
-
-    def toggle_acum_origin_display(self, active):
-        self.acum_origin_actor.SetVisibility(bool(active))
-
-    def update_vum_origin_display(self):
-        self.vum_origin_mesh.points = np.array(self.component.settings.vum_origin)
-
-    def update_acum_origin_display(self):
-        self.acum_origin_mesh.points = np.array(self.component.settings.accumulator_origin)
-
-    def update_vum_display(self, active):
-        if self.vum_actor is not None:
-            self.client.plot.remove_actor(self.vum_actor)
-        if active:
-            start_points = []
-            directions = []
-            vertices = self.component.vertices.numpy()
-
-            for face, vu in zip(self.component.faces.numpy(), self.component.vum.numpy()):
-                for v, on in zip(face, vu):
-                    if on:
-                        face_center = np.sum(vertices[face], axis=0) / 3
-                        direction = vertices[v] - face_center
-                        start_points.append(face_center)
-                        directions.append(direction)
-
-            start_points = np.array(start_points)
-            directions = np.array(directions)
-
-            mesh = pv.PolyData(start_points)
-            mesh["vectors"] = directions
-            mesh.set_active_vectors("vectors")
-            self.vum_actor = self.client.plot.add_mesh(
-                mesh.arrows,
-                color="yellow",
-                reset_camera=False
-            )
-
-    def update_displays(self):
-        self.update_vum_display(self.component.settings.vum_visible)
-
-    def remove_drawer(self):
-        self.client.plot.remove_actor(self.vum_actor)
-        self.client.plot.remove_actor(self.vum_origin_actor)
-        self.client.plot.remove_actor(self.acum_origin_actor)
-

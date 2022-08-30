@@ -18,7 +18,6 @@ import PyQt5.QtWidgets as qtw
 import PyQt5.QtCore as qtc
 import PyQt5.QtGui as qtg
 import pyvistaqt as pvqt
-import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 
@@ -30,6 +29,7 @@ import tfrt2.optics as optics
 import tfrt2.client_TCP_widget as tcp_widget
 from tfrt2.remote_controls import RemotePane
 from tfrt2.optimize import OptimizationPane
+from tfrt2_client.parameter_controller import ParameterControls
 
 
 class OpticClientWindow(qtw.QWidget):
@@ -44,11 +44,10 @@ class OpticClientWindow(qtw.QWidget):
         6: "source_rays",
         7: "unfinished_rays"
     }
+    control_pane_width = 400
 
     def __init__(self):
         super().__init__(windowTitle="Linear Mark 5 Dev Client")
-        self.control_pane_width = 350
-
         # Initialize the settings persistent data class
         self.settings_path = str(pathlib.Path(__file__).parent / "settings.dat")
         self.settings = settings.Settings()
@@ -184,6 +183,7 @@ class OpticClientWindow(qtw.QWidget):
         for pane in control_panes:
             scroll_area = qtw.QScrollArea()
             scroll_area.setHorizontalScrollBarPolicy(qtc.Qt.ScrollBarAlwaysOff)
+            scroll_area.setVerticalScrollBarPolicy(qtc.Qt.ScrollBarAlwaysOn)
             scroll_area.setWidgetResizable(True)
             pane[1].parent_scroll_area = scroll_area
             scroll_area.setWidget(pane[1])
@@ -193,7 +193,7 @@ class OpticClientWindow(qtw.QWidget):
             tab_selector.setCurrentIndex(self.settings.active_pane)
         except Exception:
             pass
-        self.ui.pane_stack.setMaximumWidth(self.control_pane_width)
+        #self.ui.pane_stack.setMaximumWidth(self.control_pane_width)
         control_layout.addWidget(self.ui.pane_stack)
 
         # Add a tabbed area to show visualizations
@@ -257,7 +257,6 @@ class OpticClientWindow(qtw.QWidget):
 
             self.redraw()
             self.try_auto_retrace()
-            self.click_reset()
         except FileNotFoundError:
             print("Invalid file")
             self.ui.loaded_label.setText("Current System: None")
@@ -275,6 +274,7 @@ class OpticClientWindow(qtw.QWidget):
         self.tcp_widget.check_system_state()
         self.remote_pane.try_activate()
         self.optimize_pane.try_activate()
+        self.click_reset()
 
     def populate_panes_from_system(self, system):
         self.display_pane.update_with_system(system)
@@ -399,6 +399,13 @@ class DisplayControls(qtw.QWidget):
         self.optical_controllers = []
         self.target_controllers = []
         self.stop_controllers = []
+        self.controllers = {}
+
+        # Set up surface picking for the plot.
+        self.parent_client.plot.enable_point_picking(
+            callback=self.point_picked, left_clicking=True, show_point=False, show_message=False, use_mesh=True,
+            tolerance=.006
+        )
 
         self.main_layout = qtw.QVBoxLayout()
         self.setLayout(self.main_layout)
@@ -406,7 +413,6 @@ class DisplayControls(qtw.QWidget):
             "These controls affect display only - they do not affect the tracing or optimization results."
         )
         main_label.setWordWrap(True)
-        main_label.setMinimumWidth(self.parent_client.control_pane_width-40)
         self.main_layout.addWidget(main_label)
         self.main_layout.addStretch()
 
@@ -423,6 +429,7 @@ class DisplayControls(qtw.QWidget):
         self.optical_controllers = []
         self.target_controllers = []
         self.stop_controllers = []
+        self.controllers = {}
 
         if system is not None:
             for part in system.opticals:
@@ -430,18 +437,22 @@ class DisplayControls(qtw.QWidget):
                 self.add_widget(qtw.QLabel(part.name))
                 self.add_widget(controller)
                 self.optical_controllers.append(controller)
+                self.controllers[part.name] = controller
+                part.drawer = controller.drawer
 
             for part in system.stops:
                 controller = optics.TrigBoundaryDisplayController(part, self.parent_client.plot)
                 self.add_widget(qtw.QLabel(part.name))
                 self.add_widget(controller)
                 self.stop_controllers.append(controller)
+                self.controllers[part.name] = controller
 
             for part in system.targets:
                 controller = optics.TrigBoundaryDisplayController(part, self.parent_client.plot)
                 self.add_widget(qtw.QLabel(part.name))
                 self.add_widget(controller)
                 self.target_controllers.append(controller)
+                self.controllers[part.name] = controller
 
         self.updateGeometry()
         if self.parent_scroll_area:
@@ -451,9 +462,19 @@ class DisplayControls(qtw.QWidget):
         self.redraw()
 
     def redraw(self):
+        self.parent_client.parameters_pane.update_selection()
         for collection in (self.optical_controllers, self.target_controllers, self.stop_controllers):
             for controller in collection:
                 controller.redraw()
+
+    def point_picked(self, mesh, point):
+        if mesh is self.parent_client.parameters_pane.selected_mesh:
+            self.parent_client.parameters_pane.point_picked(None, point)
+            return
+        for controller in self.optical_controllers:
+            if controller.drawer.mesh is mesh:
+                self.parent_client.parameters_pane.point_picked(controller.component, point)
+                return
 
 
 class ComponentControls(qtw.QWidget):
@@ -541,7 +562,6 @@ class TraceControls(qtw.QWidget):
         # Control to adjust the trace depth
         trace_depth_explainer = qtw.QLabel("Trace depth affects both local display and remote optimization.")
         trace_depth_explainer.setWordWrap(True)
-        trace_depth_explainer.setMinimumWidth(self.parent_client.control_pane_width - 40)
         main_layout.addWidget(trace_depth_explainer, 0, 0, 1, 2)
 
         trace_depth_label = qtw.QLabel("Trace Depth")
@@ -617,45 +637,6 @@ class TraceControls(qtw.QWidget):
     def clear_rays(self):
         self.ray_drawer.rays = None
         self.ray_drawer.draw()
-
-
-class ParameterControls(qtw.QWidget):
-    def __init__(self, parent):
-        super().__init__()
-        self.parent_client = parent
-        self._added_widgets = []
-        self.parameter_controllers = []
-
-        self.main_layout = qtw.QVBoxLayout()
-        self.setLayout(self.main_layout)
-        main_label = qtw.QLabel(
-            "Controls for the parameters of each parametric optic."
-        )
-        self.main_layout.addWidget(main_label)
-        self.main_layout.addStretch()
-
-    def add_widget(self, widget):
-        self.main_layout.insertWidget(self.main_layout.count() - 1, widget)
-        self._added_widgets.append(widget)
-
-    def update_with_system(self, system):
-        for widget in self._added_widgets:
-            if hasattr(widget, "remove_drawer"):
-                widget.remove_drawer()
-            widget.deleteLater()
-        self._added_widgets = []
-
-        if system is not None:
-            for part in system.opticals:
-                if hasattr(part, "parameters"):
-                        controller = component_widgets.ParameterController(part, self.parent_client)
-                        self.add_widget(qtw.QLabel(part.name))
-                        self.add_widget(controller)
-                        self.parameter_controllers.append(controller)
-
-    def refresh_parameters(self):
-        for each in self.parameter_controllers:
-            each.refresh_parameters()
 
 
 def make_app():

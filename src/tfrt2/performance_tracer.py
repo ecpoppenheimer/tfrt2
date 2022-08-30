@@ -487,10 +487,11 @@ class PerformanceTracer:
 
             # Compile a sample of rays to send
             finished_s, finished_hat, finished_meta = ray_sample
+            sample_indices = tf.random.shuffle(tf.range(finished_s.shape[0]))[:display_sample_count]
             finished_rays = (
-                finished_s[:display_sample_count].numpy(),
-                finished_hat[:display_sample_count].numpy(),
-                wv[finished_meta[:display_sample_count].numpy()]
+                tf.gather(finished_s, sample_indices, axis=0).numpy(),
+                tf.gather(finished_hat, sample_indices, axis=0).numpy(),
+                wv[tf.gather(finished_meta, sample_indices, axis=0).numpy()]
             )
 
             # Compile the new, updated parameters

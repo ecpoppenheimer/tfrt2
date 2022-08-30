@@ -166,7 +166,7 @@ class TriangleDrawer:
         self.component = component
         self.visible = visible
         self._actor = None
-        self._mesh = None
+        self.mesh = None
         self._norm_actor = None
         self._parameter_actor = None
         self.component.settings.establish_defaults(
@@ -211,9 +211,9 @@ class TriangleDrawer:
         self.plot.remove_actor(self._actor)
 
         # draw the mesh itself
-        self._mesh = self.component.as_mesh()
+        self.mesh = self.component.as_mesh()
         self._actor = self.plot.add_mesh(
-            self._mesh,
+            self.mesh,
             color=self.component.settings.color,
             opacity=self.component.settings.opacity,
             show_edges=self.component.settings.show_edges,
@@ -225,16 +225,16 @@ class TriangleDrawer:
         self.plot.remove_actor(self._parameter_actor)
         self._actor.SetVisibility(self.visible)
         if self.visible:
-            if self._mesh is None:
+            if self.mesh is None:
                 self.rebuild()
 
             # Set the data on the mesh
             try:
-                self._mesh.points, self._mesh.faces = (
+                self.mesh.points, self.mesh.faces = (
                     self.component.vertices.numpy(), mt.pack_faces(self.component.faces.numpy())
                 )
             except Exception:
-                self._mesh.points, self._mesh.faces = (
+                self.mesh.points, self.mesh.faces = (
                  np.array(self.component.vertices), mt.pack_faces(np.array(self.component.faces))
                 )
                 

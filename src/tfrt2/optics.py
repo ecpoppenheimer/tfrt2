@@ -1,3 +1,7 @@
+import traceback
+import pickle
+import pathlib
+
 import tensorflow as tf
 import pyvista as pv
 import numpy as np
@@ -9,6 +13,7 @@ import tfrt2.mesh_tools as mt
 import tfrt2.component_widgets as cw
 import tfrt2.drawing as drawing
 from tfrt2.settings import Settings
+from tfrt2.sources import get_rotation_quaternion_from_u_to_v
 
 
 class TriangleOptic:
@@ -18,10 +23,11 @@ class TriangleOptic:
     Please note that vertices and faces are always assumed to be tensorflow tensors.
     """
     dimension = 3
+    BASE_ORIENTATION = np.array((0.0, 0.0, 1.0), dtype=np.float64)
 
     def __init__(
         self, driver, system_path, input_settings, mesh=None, mat_in=None, mat_out=None, hold_load=False,
-        flip_norm=False
+        flip_norm=False, suppress_ui=False
     ):
         """
         Basic 3D Triangulated optical surface.
@@ -60,12 +66,6 @@ class TriangleOptic:
         mat_out : int
             The index of the material to use for the outside of this optic (area pointing toward from norm).
 
-        Public Attributes
-        -----------------
-        Frozen : bool
-            Can be set after constructor to prevent future calls to update from doing anything.  This can speed up
-            performace for optics that do not change after initialization.
-
         Recognized Settings
         -------------------
         visible : bool
@@ -82,7 +82,6 @@ class TriangleOptic:
 
         """
         self.settings = input_settings or Settings()
-        self.frozen = False
         self.name = None
         self.mat_in = mat_in or 0
         self.mat_out = mat_out or 0
@@ -95,6 +94,13 @@ class TriangleOptic:
         self.p = None
         self.u = None
         self.v = None
+        self.zero_points = None
+        self.drawer = None
+        self.settings.establish_defaults(frozen=False)
+        self.translation = None
+        self.rotation = None
+        self.update_rotation(False)
+        self.update_translation(False)
 
         if not hold_load:
             if mesh is None:
@@ -103,8 +109,8 @@ class TriangleOptic:
                 self.from_mesh(mesh)
 
         self.controller_widgets = []
-        if self.driver.driver_type == "client":
-            self.controller_widgets.append(cw.OpticController(self, driver, system_path))
+        if self.driver.driver_type == "client" and not suppress_ui:
+            self.controller_widgets.append(OpticController(self, driver, system_path))
 
     def load(self, in_path):
         self.from_mesh(pv.read(in_path))
@@ -119,12 +125,9 @@ class TriangleOptic:
             return pv.PolyData(np.array(self.vertices), mt.pack_faces(np.array(self.faces)))
 
     def from_mesh(self, mesh):
-        self.vertices = tf.constant(mesh.points, dtype=tf.float64)
+        self.zero_points = mesh.points
         self.faces = tf.constant(self.try_flip_norm(mt.unpack_faces(mesh.faces)), dtype=tf.int32)
-        # Separate the vertices out by face
-        self.gather_faces()
-        # Compute the norm
-        self.compute_norm()
+        self.update()
 
     def try_flip_norm(self, faces):
         if self.flip_norm:
@@ -142,7 +145,43 @@ class TriangleOptic:
         self.norm = tf.linalg.normalize(tf.linalg.cross(self.u, self.v), axis=1)[0]
 
     def update(self):
-        pass
+        if self.translation is not None and self.rotation is not None:
+            rotated_vertices = tf.convert_to_tensor(self.rotation.rotate(self.zero_points), dtype=tf.float64)
+            self.vertices = rotated_vertices + self.translation
+        else:
+            self.vertices = tf.convert_to_tensor(self.zero_points, dtype=tf.float64)
+
+        # Separate the vertices out by face
+        self.gather_faces()
+        # Compute the norm
+        self.compute_norm()
+
+    def redraw(self):
+        """
+        Only works if self.drawer was set, which must be done manually
+        """
+        if self.drawer is not None:
+            self.drawer.draw()
+
+    def update_rotation(self, do_update=True):
+        try:
+            self.rotation = get_rotation_quaternion_from_u_to_v(
+                TriangleOptic.BASE_ORIENTATION, np.array(self.settings.rotation, dtype=np.float64)
+            )
+            if do_update:
+                self.update()
+                self.redraw()
+        except KeyError:
+            pass
+
+    def update_translation(self, do_update=True):
+        try:
+            self.translation = tf.convert_to_tensor(self.settings.translation, dtype=tf.float64)
+            if do_update:
+                self.update()
+                self.redraw()
+        except KeyError:
+            pass
 
 
 class ParametricTriangleOptic(TriangleOptic):
@@ -150,12 +189,11 @@ class ParametricTriangleOptic(TriangleOptic):
     3D Triangulated parametric optic, with advanced features for use with gradient descent optimization.
 
     Update adds some extra steps beyond the canonical ones for TriangleOptic:
-    1) Set the faces in from_mesh.  Only has to be done when the optic is rebuilt.
-    2) Apply constraints.
-    3) Set the vertices from the zero points, vectors, and parameters, via get_vertices_from_params()
-    4) Separate the vertices out by face via gather_faces()
-    5) Apply the vertex update map via try_vum()
-    4) Compute the norm via compute_norm().
+    1) Apply constraints.
+    2) Set the vertices from the zero points, vectors, and parameters, via get_vertices_from_params()
+    3) Separate the vertices out by face via gather_faces()
+    4) Apply the vertex update map via try_vum()
+    5) Compute the norm via compute_norm().
     """
     def __init__(
         self,
@@ -242,9 +280,6 @@ class ParametricTriangleOptic(TriangleOptic):
             Each callable in this list will be called with the optic as the only argument, at the beginning of update().
             This is intended to be used to ensure various conditions and constraints are applied to the parameters, but
             it can be used more broadly to perform pre-update tasks, if needed.
-        Frozen : bool
-            Can be set after constructor to prevent future calls to update from doing anything.  This can speed up
-            performace for optics that do not change after initialization.
 
         Recognized Settings
         -------------------
@@ -298,11 +333,13 @@ class ParametricTriangleOptic(TriangleOptic):
         self.driver_indices = np.zeros((0,), dtype=np.int32)
         self.driven_indices = np.zeros((0,), dtype=np.int32)
         self.fixed_indices = np.zeros((0,), dtype=np.int32)
+        self.v_to_p = None
         self.full_params = False
         self._qt_compat = qt_compat
         self._d_mat = None
         self.movable_indices = None
         self.smoother = None
+        self.base_mesh = None
         if qt_compat:
             self.parameters_updated = ParamsUpdatedSignal()
         else:
@@ -323,7 +360,7 @@ class ParametricTriangleOptic(TriangleOptic):
         )
 
         if (self.enable_vum or self.enable_accumulator) and self.driver.driver_type == "client":
-            self.mt_controller = cw.MeshTricksController(self, driver)
+            self.mt_controller = MeshTricksController(self, driver)
             self.controller_widgets.append(self.mt_controller)
         else:
             self.mt_controller = None
@@ -337,6 +374,7 @@ class ParametricTriangleOptic(TriangleOptic):
             self.from_mesh(mesh)
 
     def from_mesh(self, mesh, initials=None):
+        self.base_mesh = mesh
         all_indices = np.arange(mesh.points.shape[0])
         available_indices = all_indices.copy()
         drivens_driver = {}
@@ -394,7 +432,7 @@ class ParametricTriangleOptic(TriangleOptic):
         movable_count = len(self.movable_indices)
         param_count = len(driver_indices)
         self.fixed_points = tf.constant(mesh.points[fixed_indices], dtype=tf.float64)
-        self.zero_points = tf.constant(mesh.points[self.movable_indices], dtype=tf.float64)
+        self.zero_points = mesh.points[self.movable_indices]
 
         if self.any_driven:
             # Sanity check that every vertex in movable indices is a key in drivens_driver and that the set of values in
@@ -420,15 +458,22 @@ class ParametricTriangleOptic(TriangleOptic):
                 reindex_driver[d] = count
                 count += 1
 
-            drivens_driver = {reindex_driven[key]: reindex_driver[value] for key, value in drivens_driver.items()}
+            gather_drivens_driver = {
+                reindex_driven[key]: reindex_driver[value] for key, value in drivens_driver.items()
+            }
 
             # Now need to construct the gather_params, a set of indices that can be used to gather from parameters to
             # zero points.
-            self.gather_params = tf.constant([drivens_driver[key] for key in range(movable_count)], dtype=tf.int32)
+            self.gather_params = tf.constant(
+                [gather_drivens_driver[key] for key in range(movable_count)],
+                dtype=tf.int32
+            )
+
+        # Convert movable_to_p to an array, for speed
 
         if self.any_fixed:
             # Now need to construct gather_vertices, a set of indices that can be used to gather from
-            # the concatenation of fixed_points and zero_points (in that order) to the indices.
+            # the concatenation of fixed_points and zero_points (in that order) to the full vertices.
             gather_vertices = np.argsort(np.concatenate((fixed_indices, self.movable_indices)))
             self.gather_vertices = tf.constant(gather_vertices, dtype=tf.int32)
 
@@ -439,7 +484,21 @@ class ParametricTriangleOptic(TriangleOptic):
             self.initials = initials
         self.parameters = tf.Variable(self.initials)
         self.faces = tf.convert_to_tensor(self.try_flip_norm(mt.unpack_faces(mesh.faces)), dtype=tf.int32)
-        self.vectors = tf.convert_to_tensor(self.vector_generator(self.zero_points), dtype=tf.float64)
+        self.vectors = self.vector_generator(self.zero_points)
+
+        # Need to construct v_to_p, which maps every vertex to a parameter, or -1 if there is no parameter.
+        # Want it to be an array, for speed.  Goes like how the gathers are used in get_vertices_from_params, though
+        # this constructs a map that is the inverse of the gather maps.
+        p = np.arange(param_count, dtype=np.int32)
+        if self.any_driven:
+            m_to_p = p[self.gather_params.numpy()]
+        else:
+            m_to_p = p
+        if self.any_fixed:
+            all_v = np.concatenate((-np.ones((self.fixed_points.shape[0],), dtype=np.int32), m_to_p), axis=0)
+            self.v_to_p = all_v[self.gather_vertices.numpy()]
+        else:
+            self.v_to_p = m_to_p
 
         # Need to temporarily disable the vum so we can update so we can get the parts we need to make the new VUM.
         enable_vum = self.enable_vum
@@ -470,7 +529,7 @@ class ParametricTriangleOptic(TriangleOptic):
             self.mt_controller.update_displays()
 
     def update(self, force=False):
-        if not self.frozen or force:
+        if not self.settings.frozen or force:
             # Apply constraints
             for constraint in self.constraints:
                 constraint(self)
@@ -491,7 +550,15 @@ class ParametricTriangleOptic(TriangleOptic):
             gathered_params = tf.gather(params, self.gather_params, axis=0)
         else:
             gathered_params = params
-        vertices = self.zero_points + gathered_params * self.vectors
+
+        # Perform transformations
+        if self.translation is not None and self.rotation is not None:
+            rotated_vectors = tf.convert_to_tensor(self.rotation.rotate(self.vectors), dtype=tf.float64)
+            rotated_zero_points = tf.convert_to_tensor(self.rotation.rotate(self.zero_points), dtype=tf.float64)
+            vertices = rotated_zero_points + self.translation + gathered_params * rotated_vectors
+        else:
+            rotated_vectors = tf.convert_to_tensor(self.vectors, dtype=tf.float64)
+            vertices = tf.convert_to_tensor(self.zero_points, dtype=tf.float64) + gathered_params * rotated_vectors
 
         if self.any_fixed:
             # If any vertices are fixed vertices, we need to add them in using gather_vertices
@@ -510,7 +577,7 @@ class ParametricTriangleOptic(TriangleOptic):
         return p_indices[v_index]
 
     def constrain(self):
-        if not self.frozen:
+        if not self.settings.frozen:
             for constraint in self.constraints:
                 constraint(self)
 
@@ -613,6 +680,9 @@ class ParametricTriangleOptic(TriangleOptic):
             if isinstance(c, qtw.QWidget) and self.driver.driver_type == "client":
                 self.controller_widgets.append(c)
         return constraints
+
+
+# ======================================================================================================================
 
 
 class ParamsUpdatedSignal(qtc.QObject):
@@ -767,6 +837,308 @@ class TrigBoundaryDisplayController(qtw.QWidget):
             for each in self._driving_labels_actors:
                 self.plot.remove_actor(each)
             self._driving_labels_actors = []
+
+
+class OpticController(qtw.QWidget):
+    def __init__(self, component, driver, system_path):
+        """
+        It is the responsibility of the user to establish default settings.
+
+        Always required for a controller driven optic:
+            mesh_output_path
+        If this is a parametric optic, requires:
+            zero_points_input_path
+            parameters_path
+        If a mesh was not specified to the component constructor:
+            mesh_input_path
+
+        Parameters
+        ----------
+        component : optics.OpticBase
+            The optic to associate this controller with
+        """
+        super().__init__()
+        self.component = component
+        self.driver = driver
+        self._params_valid = hasattr(self.component, "parameters")
+        settings_keys = set(self.component.settings.dict.keys())
+        self._input_valid = "mesh_input_path" in settings_keys
+        self._output_valid = "mesh_output_path" in settings_keys
+
+        self.component.settings.establish_defaults(
+            translation=np.array((0.0, 0.0, 0.0), dtype=np.float64),
+            rotation=TriangleOptic.BASE_ORIENTATION.copy()
+        )
+
+        # build the UI elements
+        main_layout = qtw.QGridLayout()
+        main_layout.setContentsMargins(11, 11, 0, 11)
+        self.setLayout(main_layout)
+        ui_row = 0
+
+        if self._output_valid:
+            main_layout.addWidget(qtw.QLabel("Mesh Output"), ui_row, 0, 1, 12)
+            ui_row += 1
+            main_layout.addWidget(cw.SettingsFileBox(
+                self.component.settings, "mesh_output_path", system_path, "*.stl", "save", self.save_mesh
+            ), ui_row, 0, 1, 12)
+            ui_row += 1
+        if self._params_valid:
+            self.component.settings.establish_defaults(
+                parameters_path=str(pathlib.Path(system_path) / "parameters.dat")
+            )
+            main_layout.addWidget(qtw.QLabel("Parameters"), ui_row, 0, 1, 12)
+            ui_row += 1
+            main_layout.addWidget(cw.SettingsFileBox(
+                self.component.settings, "parameters_path", system_path, "*.dat", "both",
+                self.save_parameters, self.load_parameters
+            ), ui_row, 0, 1, 12)
+            ui_row += 1
+        if self._input_valid:
+            main_layout.addWidget(qtw.QLabel("Mesh Input"), ui_row, 0, 1, 12)
+            ui_row += 1
+            main_layout.addWidget(cw.SettingsFileBox(
+                self.component.settings, "mesh_input_path", system_path, "*.stl", "load", self.load_mesh
+            ), ui_row, 0, 1, 12)
+            ui_row += 1
+        if self._output_valid and self._params_valid:
+            save_all_button = qtw.QPushButton("Save Everything")
+            save_all_button.clicked.connect(self.save_all)
+            main_layout.addWidget(save_all_button, ui_row, 0, 1, 3)
+
+        main_layout.addWidget(cw.SettingsCheckBox(self.component.settings, "frozen", "Freeze Optic"), ui_row, 6, 1, 3)
+        ui_row += 1
+
+        main_layout.addWidget(
+            cw.SettingsVectorBox(
+                self.component.settings, "Translation", "translation", self.component.update_translation
+            ),
+            ui_row, 0, 1, 12
+        )
+        ui_row += 1
+        main_layout.addWidget(
+            cw.SettingsVectorBox(
+                self.component.settings, "Rotation", "rotation", self.component.update_rotation
+            ),
+            ui_row, 0, 1, 12
+        )
+        ui_row += 1
+
+        # !!!!!!!!!!!!! this has to be moved to a generally re-parametrizable optic.
+        """if self._params_valid:
+            main_layout.addWidget(SettingsEntryBox(
+                self.component.settings,
+                "parameter_count",
+                int,
+                qtg.QIntValidator(5, 1000),
+                [self.component.remesh, self.component.update]
+            ))"""
+
+    def save_mesh(self):
+        if self._output_valid:
+            self.component.save(self.component.settings.mesh_output_path)
+            print(f"saved mesh for {self.component.name}: {self.component.settings.mesh_output_path}")
+
+    def load_zero_points(self):
+        if self._input_valid:
+            self.component.load(self.component.settings.mesh_input_path)
+            self.driver.update_optics()
+            self.driver.try_auto_redraw()
+            print(f"loaded mesh for {self.component.name}: {self.component.settings.mesh_input_path}")
+
+    def save_parameters(self):
+        if self._params_valid:
+            try:
+                with open(self.component.settings.parameters_path, 'wb') as outFile:
+                    pickle.dump((
+                        self.component.parameters.numpy()
+                    ), outFile)
+                print(f"saved parameters for {self.component.name}: {self.component.settings.parameters_path}")
+            except Exception:
+                print(f"Exception while trying to save parameters")
+                print(traceback.format_exc())
+
+    def load_parameters(self):
+        if self._params_valid:
+            try:
+                with open(self.component.settings.parameters_path, 'rb') as inFile:
+                    params = pickle.load(inFile)
+                    if params.shape == self.component.parameters.shape:
+                        self.component.param_assign(params)
+                    else:
+                        print(f"Error: Cannot load parameters - shape does not match for this optic.")
+                        return
+                print(f"loaded parameters for {self.component.name}: {self.component.settings.parameters_path}")
+                self.driver.update_optics()
+                self.driver.redraw()
+                if self.driver is not None:
+                    self.driver.parameters_pane.refresh_parameters()
+            except Exception:
+                print(f"Exception while trying to load parameters")
+                print(traceback.format_exc())
+
+    def load_mesh(self):
+        if self._input_valid:
+            self.component.load(self.component.settings.mesh_input_path)
+            self.driver.update_optics()
+            self.driver.redraw()
+            try:
+                self.component.drawer.draw()
+            except Exception:
+                pass
+            print(f"loaded mesh for {self.component.name}: {self.component.settings.mesh_input_path}")
+
+    def save_all(self):
+        # These functions already check whether their operation is valid, and silently do nothing if it isn't
+        self.save_mesh()
+        self.save_parameters()
+
+
+class MeshTricksController(qtw.QWidget):
+    def __init__(self, component, client):
+        """
+        Controller widget that controls the display and generation of the mesh tricks.  This widget establishes
+        its needed defaults.
+
+        Parameters
+        ----------
+        component : optics.ParametricTriangleOptic
+            The component to control with this controller
+        """
+        super().__init__()
+        self.component = component
+        self.client = client
+
+        # Build the UI elements
+        main_layout = qtw.QGridLayout()
+        main_layout.setContentsMargins(11, 11, 0, 11)
+        self.setLayout(main_layout)
+
+        # Set up the vum origin
+        if self.component.enable_vum:
+            self.component.settings.establish_defaults(vum_origin=[0.0, 0.0, 0.0])
+            self.vum_origin_mesh = pv.PolyData(np.array(self.component.settings.vum_origin))
+            self.vum_origin_actor = self.client.plot.add_mesh(
+                self.vum_origin_mesh, render_points_as_spheres=True, color="red", point_size=15.0
+            )
+
+            main_layout.addWidget(
+                cw.SettingsVectorBox(
+                    self.component.settings,
+                    "VUM Origin",
+                    "vum_origin",
+                    [self.update_vum_origin_display, self.component.try_mesh_tools]
+                ), 0, 0, 1, 2
+            )
+            self.component.settings.establish_defaults(vum_origin_visible=False)
+            main_layout.addWidget(
+                cw.SettingsCheckBox(
+                    self.component.settings, "vum_origin_visible", "Show vum origin", self.toggle_vum_origin_display
+                ), 2, 1, 1, 1
+            )
+            self.toggle_vum_origin_display(self.component.settings.vum_origin_visible)
+
+        # Set up the acum origin
+        if self.component.enable_accumulator:
+            self.component.settings.establish_defaults(accumulator_origin=[0.0, 0.0, 0.0])
+            self.acum_origin_mesh = pv.PolyData(np.array(self.component.settings.accumulator_origin))
+            self.acum_origin_actor = self.client.plot.add_mesh(
+                self.acum_origin_mesh, render_points_as_spheres=True, color="red", point_size=15.0
+            )
+
+            main_layout.addWidget(
+                cw.SettingsVectorBox(
+                    self.component.settings,
+                    "Acum Origin",
+                    "accumulator_origin",
+                    [self.update_acum_origin_display, self.component.try_mesh_tools]
+                ), 1, 0, 1, 2
+            )
+            self.component.settings.establish_defaults(acum_origin_visible=False)
+            main_layout.addWidget(
+                cw.SettingsCheckBox(
+                    self.component.settings, "acum_origin_visible", "Show accumulator origin", self.toggle_acum_origin_display
+                ), 2, 0, 1, 1
+            )
+            self.toggle_acum_origin_display(self.component.settings.acum_origin_visible)
+
+        # Set up the vertex update map
+        if self.component.enable_vum:
+            self.component.settings.establish_defaults(vum_active=True)
+            self.component.settings.establish_defaults(vum_visible=False)
+            main_layout.addWidget(
+                cw.SettingsCheckBox(self.component.settings, "vum_active", "VUM Active"),
+                3, 1, 1, 1
+            )
+            main_layout.addWidget(
+                cw.SettingsCheckBox(self.component.settings, "vum_visible", "VUM Visible", self.update_vum_display),
+                4, 1, 1, 1
+            )
+        else:
+            self.component.settings.establish_defaults(vum_active=False)
+            self.component.settings.establish_defaults(vum_visible=False)
+        self.vum_actor = None
+
+        # Set up the accumulator
+        if self.component.enable_accumulator:
+            self.component.settings.establish_defaults(accumulator_active=True)
+            main_layout.addWidget(
+                cw.SettingsCheckBox(self.component.settings, "accumulator_active", "Accumulator Active"),
+                3, 0, 1, 1
+            )
+        else:
+            self.component.settings.establish_defaults(accumulator_active=False)
+
+    def toggle_vum_origin_display(self, active):
+        self.vum_origin_actor.SetVisibility(bool(active))
+
+    def toggle_acum_origin_display(self, active):
+        self.acum_origin_actor.SetVisibility(bool(active))
+
+    def update_vum_origin_display(self):
+        self.vum_origin_mesh.points = np.array(self.component.settings.vum_origin)
+
+    def update_acum_origin_display(self):
+        self.acum_origin_mesh.points = np.array(self.component.settings.accumulator_origin)
+
+    def update_vum_display(self, active):
+        if self.vum_actor is not None:
+            self.client.plot.remove_actor(self.vum_actor)
+        if active:
+            start_points = []
+            directions = []
+            vertices = self.component.vertices.numpy()
+
+            for face, vu in zip(self.component.faces.numpy(), self.component.vum.numpy()):
+                for v, on in zip(face, vu):
+                    if on:
+                        face_center = np.sum(vertices[face], axis=0) / 3
+                        direction = vertices[v] - face_center
+                        start_points.append(face_center)
+                        directions.append(direction)
+
+            start_points = np.array(start_points)
+            directions = np.array(directions)
+
+            mesh = pv.PolyData(start_points)
+            mesh["vectors"] = directions
+            mesh.set_active_vectors("vectors")
+            self.vum_actor = self.client.plot.add_mesh(
+                mesh.arrows,
+                color="yellow",
+                reset_camera=False
+            )
+
+    def update_displays(self):
+        self.update_vum_display(self.component.settings.vum_visible)
+
+    def remove_drawer(self):
+        self.client.plot.remove_actor(self.vum_actor)
+        self.client.plot.remove_actor(self.vum_origin_actor)
+        self.client.plot.remove_actor(self.acum_origin_actor)
+
+
+# ======================================================================================================================
 
 
 class ClipConstraint(qtw.QWidget):
