@@ -19,6 +19,7 @@ import numpy as np
 import PyQt5.QtNetwork as qtn
 import PyQt5.QtWidgets as qtw
 import PyQt5.QtCore as qtc
+import pyvista as pv
 
 import tfrt2.tcp_base as tcp
 from tfrt2.settings import Settings
@@ -67,6 +68,7 @@ class TraceServer(qtn.QTcpServer):
             tcp.CLIENT_RESET_SYS: self.reset_system,
             tcp.CLIENT_ABORT_PROCS: self.abort_processing,
             tcp.CLIENT_SINGLE_STEP: self.single_step,
+            tcp.CLIENT_REMESH: self.remesh
         }
 
         # Make a performance tracer, which will organize the process of doing various high-throughput computing
@@ -366,6 +368,23 @@ class TraceServer(qtn.QTcpServer):
     def shut_down(self):
         self.clean_temp()
         self.engine.shut_down()
+
+    def remesh(self, data):
+        name, points, faces = pickle.loads(data)
+
+        if self.engine.try_wait():
+            self.client_socket.write(tcp.SERVER_REMESH_ACK, pickle.dumps((False, name)))
+            self.send_nonfatal_error(f"remeshing {name}, server was busy")
+            return
+
+        try:
+            if self.optical_system:
+                self.optical_system.parts[name].remesh(pv.PolyData(points, faces))
+            self.client_socket.write(tcp.SERVER_REMESH_ACK, pickle.dumps((True, name)))
+        except Exception:
+            self.client_socket.write(tcp.SERVER_REMESH_ACK, pickle.dumps((False, name)))
+            self.send_nonfatal_error(f"remeshing {name}")
+
 
 
 class BusySignal(qtc.QObject):

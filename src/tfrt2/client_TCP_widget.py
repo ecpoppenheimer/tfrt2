@@ -78,6 +78,7 @@ class ClientTCPWidget(qtw.QWidget):
             tcp.SERVER_FLATTENER: self.feed_flattener,
             tcp.SERVER_SINGLE_STEP: self.client.optimize_pane.receive_single_step,
             tcp.SERVER_ST_UPDATE: self.receive_status_update,
+            tcp.SERVER_REMESH_ACK: self.server_remesh_ack
         }
 
         # Establish settings defaults
@@ -320,6 +321,11 @@ class ClientTCPWidget(qtw.QWidget):
 
             self.add_sync_task("driver_settings", self.get_clean_driver_settings())
             self.add_sync_task("system_settings", self.get_clean_system_settings())
+            for component in self.client.optical_system.parametric_optics:
+                if component.tcp_ack_remeshed:
+                    component.tcp_ack_remeshed = False
+                    self.add_sync_task("remesh", component.name, component.base_mesh)
+
             self.add_sync_task("send_parameters")
             self.add_sync_task("system_load")
 
@@ -360,6 +366,9 @@ class ClientTCPWidget(qtw.QWidget):
         elif mode == "send_parameters":
             title, key = "Transfer Parameters", "send_parameters"
             self.send_parameters()
+        elif mode == "remesh":
+            title, key = f"Remesh {args[0]}", f"remesh {args[0]}"
+            self.send_remesh(*args)
         elif mode == "file_transfer":
             local_filename = Path(args[1])
             title, key = "FTP " + str(local_filename.stem) + str(local_filename.suffix), args[0]
@@ -493,6 +502,17 @@ class ClientTCPWidget(qtw.QWidget):
             if hasattr(value, "parameters"):
                 all_params[key] = value.parameters.numpy()
         self.server_socket.write(tcp.CLIENT_PARAMS, pickle.dumps(all_params))
+
+    def send_remesh(self, name, base_mesh):
+        self.server_socket.write(tcp.CLIENT_REMESH, pickle.dumps((
+            name,
+            base_mesh.points,
+            base_mesh.faces
+        )))
+
+    def server_remesh_ack(self, data):
+        status, name = pickle.loads(data)
+        self._server_ack(status, f"remesh {name}")
 
     @staticmethod
     def print_server_message(data):

@@ -1,10 +1,12 @@
 import math
+import traceback
 
 import numpy as np
-import PyQt5.QtWidgets as qtw
 import pyvista as pv
-
+import tensorflow as tf
+import PyQt5.QtWidgets as qtw
 import PyQt5.QtGui as qtg
+import PyQt5.QtCore as qtc
 
 import tfrt2.component_widgets as cw
 import tfrt2.mesh_tools as mt
@@ -206,7 +208,7 @@ class ParameterControls(qtw.QWidget):
 
         if system is not None:
             for part in system.parametric_optics:
-                controller = cw.ParameterController(part, self.parent_client)
+                controller = ParameterController(part, self.parent_client)
                 self.add_widget(qtw.QLabel(part.name))
                 self.add_widget(controller)
                 self.parameter_controllers.append(controller)
@@ -279,6 +281,9 @@ class ParameterControls(qtw.QWidget):
     def update_selection(self):
         if self.selectable_component is None:
             return
+        if self.selectable_component.p_controller_ack_remeshed:
+            self.handle_remesh()
+
         self.parent_client.plot.remove_actor(self._selected_mesh_actor)
         if len(self.selected_vertices) > 0:
             all_points = self.selectable_component.vertices.numpy()
@@ -333,10 +338,12 @@ class ParameterControls(qtw.QWidget):
     def slider_pressed(self):
         if self.selectable_component is None or len(self.selected_vertices) == 0:
             return
+        if self.selectable_component.p_controller_ack_remeshed:
+            self.handle_remesh()
 
         self.start_p = self.selectable_component.parameters.numpy()
-        self.slider_scale_max = np.amax(self.start_p) * 2
-        self.slider_scale_min = min(np.amin(self.start_p) * 2, -self.slider_scale_max)
+        self.slider_scale_max = np.amax(np.abs(self.start_p)) * 2
+        self.slider_scale_min = min(np.amin(np.abs(self.start_p)) * 2, -self.slider_scale_max)
         self.old_parameters = self.selectable_component.parameters.numpy()
 
     def slider_released(self):
@@ -534,13 +541,23 @@ class ParameterControls(qtw.QWidget):
         self.selected_vertices = self.filter(np.arange(self.selectable_component.vertices.shape[0])) - flat_selection
         self.update_selection()
 
+    def handle_remesh(self):
+        self.selectable_component.p_controller_ack_remeshed = False
+        self.click_select_none()
+        self.selector_changed(None)
+
+    def undoable_parameter_update(self, component, new_params, old_params=None):
+        if old_params is None:
+            old_params = component.parameters
+        self.undo_stack.push(ParamUpdateAction(component, self, new_params, old_params))
+
 
 class ParamUpdateAction(qtw.QUndoCommand):
     def __init__(self, component, param_controller, new_params, old_params):
         self.component = component
         self.param_controller = param_controller
-        self.new_params = new_params
-        self.old_params = old_params
+        self.new_params = np.array(new_params, dtype=np.float64)
+        self.old_params = np.array(old_params, dtype=np.float64)
         super().__init__()
 
     def redo(self):
@@ -556,3 +573,207 @@ class ParamUpdateAction(qtw.QUndoCommand):
         self.param_controller.update_selection()
 
 
+class ParameterController(qtw.QWidget):
+    def __init__(self, component, client):
+        super().__init__()
+        self.component = component
+        self.client = client
+        self._suppress_updates = False
+        self.smoother = None
+
+        # Build the UI elements
+        main_layout = qtw.QGridLayout()
+        main_layout.setContentsMargins(11, 11, 0, 11)
+        self.setLayout(main_layout)
+
+        # Parameter list
+        show_params = qtw.QCheckBox("Show parameters")
+        show_params.setCheckState(False)
+        show_params.setTristate(False)
+        main_layout.addWidget(show_params, 0, 0)
+
+        def refresh_click():
+            self.refresh_parameters()
+
+        refresh_list_button = qtw.QPushButton("Refresh")
+        refresh_list_button.hide()
+        refresh_list_button.clicked.connect(refresh_click)
+        main_layout.addWidget(refresh_list_button, 0, 1)
+
+        self.parameter_list = qtw.QTableWidget(0, 1)
+        self.parameter_list.setHorizontalHeaderLabels(("Index", "Value"))
+        self.parameter_list.setHorizontalScrollBarPolicy(qtc.Qt.ScrollBarAlwaysOff)
+        self.parameter_list.horizontalHeader().setSectionResizeMode(0, qtw.QHeaderView.Stretch)
+        self.parameter_list.hide()
+        self.parameter_list.itemChanged.connect(self.edit_parameter)
+        main_layout.addWidget(self.parameter_list, 1, 0, 1, 2)
+
+        def toggle_list():
+            state = not self.parameter_list.isHidden()
+            if state:
+                self.parameter_list.hide()
+                refresh_list_button.hide()
+            else:
+                self.parameter_list.show()
+                refresh_list_button.show()
+                self.refresh_parameters()
+
+        show_params.clicked.connect(toggle_list)
+
+        # Button to reset the parameters
+        reset_widget = qtw.QWidget()
+        reset_layout = qtw.QHBoxLayout()
+        reset_layout.setContentsMargins(0, 0, 0, 0)
+        reset_widget.setLayout(reset_layout)
+        reset_button = qtw.QPushButton("Reset to initials")
+
+        def click_reset():
+            try:
+                self.client.parameters_pane.undoable_parameter_update(self.component, self.component.initials)
+                self.update_everything()
+            except Exception:
+                print(f"Could not reset parameters:")
+                print(traceback.format_exc())
+
+        reset_button.clicked.connect(click_reset)
+        reset_layout.addWidget(reset_button)
+
+        noise_button = qtw.QPushButton("Add Noise")
+        noise_scale = qtw.QLineEdit(".1")
+        noise_scale.setValidator(qtg.QDoubleValidator(1e-6, 1e3, 4))
+
+        def click_noise():
+            try:
+                scale = float(noise_scale.text())
+                new_params = tf.random.normal(self.component.parameters.shape, stddev=scale, dtype=tf.float64) +\
+                    self.component.parameters
+                self.client.parameters_pane.undoable_parameter_update(self.component, new_params)
+                self.update_everything()
+            except Exception:
+                print(f"Could not add noise to parameters:")
+                print(traceback.format_exc())
+
+        noise_button.clicked.connect(click_noise)
+        reset_layout.addWidget(noise_button)
+        reset_layout.addWidget(noise_scale)
+
+        main_layout.addWidget(reset_widget, 3, 0, 1, 2)
+
+        # Button to test the accumulator on a parameter.
+        try:
+            if self.component.accumulator is not None:
+                acumulator_widget = qtw.QWidget()
+                acumulator_layout = qtw.QGridLayout()
+                acumulator_layout.setContentsMargins(0, 0, 0, 0)
+                acumulator_widget.setLayout(acumulator_layout)
+
+                acumulator_layout.addWidget(qtw.QLabel("Test Accumulator"), 0, 0)
+                acumulator_test_button = qtw.QPushButton("Test")
+                acumulator_test_button.clicked.connect(self.test_acumulator)
+                acumulator_layout.addWidget(acumulator_test_button, 1, 0)
+
+                acumulator_layout.addWidget(qtw.QLabel("Vertex"), 0, 1)
+                self.acumulator_vertex_edit = qtw.QLineEdit("0")
+                self.acumulator_vertex_edit.setValidator(qtg.QIntValidator(0, self.component.parameters.shape[0] - 1))
+                acumulator_layout.addWidget(self.acumulator_vertex_edit, 1, 1)
+
+                acumulator_layout.addWidget(qtw.QLabel("Adjustment"), 0, 2)
+                self.acumulator_scale_edit = qtw.QLineEdit(".05")
+                self.acumulator_scale_edit.setValidator(qtg.QDoubleValidator(1e-9, 1e-9, 10))
+                acumulator_layout.addWidget(self.acumulator_scale_edit, 1, 2)
+
+                main_layout.addWidget(acumulator_widget, 5, 0, 1, 2)
+        except Exception:
+            pass
+
+        # Make a smoother
+        main_layout.addWidget(cw.SettingsEntryBox(
+            self.component.settings, "smooth_stddev", float, qtg.QDoubleValidator(1e-6, 1e6, 8), self.update_smoother
+        ), 6, 0, 1, 1)
+        main_layout.addWidget(cw.SettingsCheckBox(
+            self.component.settings, "smooth_active", "Active"
+        ), 6, 1, 1, 1)
+        smooth_button = qtw.QPushButton("Test Smoother")
+        smooth_button.clicked.connect(self.test_smoother)
+        main_layout.addWidget(smooth_button, 7, 0, 1, 1)
+
+        # Entry box for the relative LR
+        main_layout.addWidget(cw.SettingsEntryBox(
+            self.component.settings, "relative_lr", float, qtg.QDoubleValidator(0, 1e10, 8), self.update_smoother
+        ), 8, 0, 1, 2)
+
+        # optionally register a callback to update the parameters from the boundary.  This only works if the boundary
+        # explicitly calls the signal
+        try:
+            self.component.parameters_updated.sig.connect(self.refresh_parameters)
+        except Exception:
+            pass
+
+    def test_acumulator(self):
+        vertex = int(self.acumulator_vertex_edit.text())
+        if vertex >= self.component.parameters.shape[0]:
+            vertex = self.component.parameters.shape[0] - 1
+            self.acumulator_vertex_edit.setText(str(vertex))
+
+        adjustment = float(self.acumulator_scale_edit.text())
+        delta = np.zeros_like(self.component.parameters)
+        delta[vertex] = adjustment
+
+        delta = self.component.try_accumulate(delta)
+
+        new_params = self.component.parameters + delta
+        self.client.parameters_pane.undoable_parameter_update(self.component, new_params)
+        self.update_everything()
+
+    def refresh_parameters(self):
+        try:
+            count = self.component.parameters.shape[0]
+            values = [f"{v[0]:.10f}" for v in self.component.parameters.numpy()]
+            self._suppress_updates = True
+            if self.parameter_list.rowCount() != count:
+                self.parameter_list.setRowCount(count)
+                self.parameter_list.setVerticalHeaderLabels((str(i) for i in range(count)))
+                for i, v in zip(range(count), values):
+                    self.parameter_list.setItem(i, 0, qtw.QTableWidgetItem(v))
+
+                # since we have detected a change in the parameter count, update the acumulator vertex validator
+                try:
+                    self.acumulator_vertex_edit.setValidator(qtg.QIntValidator(0, self.component.parameters.shape[0] - 1))
+                except Exception:
+                    pass
+            else:
+                for i, v in zip(range(count), values):
+                    self.parameter_list.item(i, 0).setText(v)
+            self._suppress_updates = False
+        except Exception:
+            pass
+
+    def edit_parameter(self, item):
+        if self._suppress_updates:
+            return
+        vertex = item.row()
+        params = self.component.parameters.numpy()
+        params[vertex] = float(item.text())
+        self.client.parameters_pane.undoable_parameter_update(self.component, params)
+        self.update_everything()
+
+    def update_everything(self):
+        # component.update respects constraints, which can hide changes, so lets re-update this item to reflect that...
+        # Nope, because constraints can be more complicated than that.  Update the entire display.
+        self.client.update_optics()
+        self.client.try_auto_retrace()
+        self.refresh_parameters()
+        try:
+            self.component.drawer.draw()
+        except AttributeError:
+            pass
+
+    def update_smoother(self):
+        self.component.smoother = self.component.get_smoother(self.component.settings.smooth_stddev)
+
+    def test_smoother(self):
+        old_params = self.component.parameters.numpy()
+        self.component.smooth()
+        new_params = self.component.parameters.numpy()
+        self.client.parameters_pane.undoable_parameter_update(self.component, new_params, old_params)
+        self.update_everything()

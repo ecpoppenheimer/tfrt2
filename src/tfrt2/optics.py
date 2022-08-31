@@ -1,19 +1,23 @@
 import traceback
 import pickle
 import pathlib
+import abc
 
+import scipy.interpolate
 import tensorflow as tf
 import pyvista as pv
 import numpy as np
 import PyQt5.QtCore as qtc
 import PyQt5.QtGui as qtg
 import PyQt5.QtWidgets as qtw
+import scipy
 
 import tfrt2.mesh_tools as mt
 import tfrt2.component_widgets as cw
 import tfrt2.drawing as drawing
 from tfrt2.settings import Settings
 from tfrt2.sources import get_rotation_quaternion_from_u_to_v
+from tfrt2.vector_generator import FromVectorVG
 
 
 class TriangleOptic:
@@ -99,8 +103,8 @@ class TriangleOptic:
         self.settings.establish_defaults(frozen=False)
         self.translation = None
         self.rotation = None
-        self.update_rotation(False)
-        self.update_translation(False)
+        self.tcp_ack_remeshed = False
+        self.p_controller_ack_remeshed = False
 
         if not hold_load:
             if mesh is None:
@@ -111,6 +115,9 @@ class TriangleOptic:
         self.controller_widgets = []
         if self.driver.driver_type == "client" and not suppress_ui:
             self.controller_widgets.append(OpticController(self, driver, system_path))
+
+        self.update_rotation(False)
+        self.update_translation(False)
 
     def load(self, in_path):
         self.from_mesh(pv.read(in_path))
@@ -325,6 +332,7 @@ class ParametricTriangleOptic(TriangleOptic):
         self.zero_points = None
         self.vectors = None
         self.fixed_points = None
+        self.fixed_point_zeros = None
         self.gather_vertices = None
         self.gather_params = None
         self.initials = None
@@ -374,6 +382,11 @@ class ParametricTriangleOptic(TriangleOptic):
             self.from_mesh(mesh)
 
     def from_mesh(self, mesh, initials=None):
+        """
+        If initials is not None, it must be either a scalar, or it must be shaped like the parameters (taking into
+        account the fixed / driven vertices), or it must be shaped like the vertices (or at least, have one element
+        per vertex).
+        """
         self.base_mesh = mesh
         all_indices = np.arange(mesh.points.shape[0])
         available_indices = all_indices.copy()
@@ -431,7 +444,8 @@ class ParametricTriangleOptic(TriangleOptic):
         self.movable_indices = np.setdiff1d(np.arange(mesh.points.shape[0]), fixed_indices)
         movable_count = len(self.movable_indices)
         param_count = len(driver_indices)
-        self.fixed_points = tf.constant(mesh.points[fixed_indices], dtype=tf.float64)
+        self.fixed_points = mesh.points[fixed_indices]
+        self.fixed_point_zeros = self.fixed_points.copy()
         self.zero_points = mesh.points[self.movable_indices]
 
         if self.any_driven:
@@ -478,11 +492,7 @@ class ParametricTriangleOptic(TriangleOptic):
             self.gather_vertices = tf.constant(gather_vertices, dtype=tf.int32)
 
         # Make the final components of the surface.
-        if initials is None:
-            self.initials = tf.zeros((param_count, 1), dtype=tf.float64)
-        else:
-            self.initials = initials
-        self.parameters = tf.Variable(self.initials)
+        self.parameters = tf.Variable(initial_value=tf.zeros((param_count, 1), dtype=tf.float64))
         self.faces = tf.convert_to_tensor(self.try_flip_norm(mt.unpack_faces(mesh.faces)), dtype=tf.int32)
         self.vectors = self.vector_generator(self.zero_points)
 
@@ -499,6 +509,30 @@ class ParametricTriangleOptic(TriangleOptic):
             self.v_to_p = all_v[self.gather_vertices.numpy()]
         else:
             self.v_to_p = m_to_p
+
+        # Set the initials
+        if initials is None:
+            self.initials = tf.zeros((param_count, 1), dtype=tf.float64)
+        else:
+            try:
+                self.initials = tf.broadcast_to(initials, (param_count, 1))
+            except Exception:
+                initials = np.asarray(initials, dtype=np.float64)
+                # If initials cannot be broadcast to the parameters directly, it needs to have one element per
+                # vertex, and we will need to match vertices to parameters.  This can be accomplished with v_to_p.
+                # v_to_p has one element per vertex in the full mesh.  If the element in a position is positive, it
+                # is the index of a parameter, and if the element is -1, it corresponds to a fixed point.
+
+                # Select out the movable points, and relate to parameters.  Harder because, unlike the fixed points,
+                # each parameter may be pointed to by more than one vertex.  Will use np.unique and just use the
+                # first initial for each parameter, ignoring all the rest of the data.  Unique_p indexes into
+                # parameters, but contains -1s for fixed indices that have to be filtered out.  np.unique sorts
+                # its output, so it doesn't have to be re-indexed.  unique_p_indices is the index in initials to get
+                # for each parameter.
+                unique_p, unique_p_indices = np.unique(self.v_to_p, return_index=True)
+                unique_p_indices = unique_p_indices[unique_p >= 0]
+                self.initials = tf.reshape(tf.convert_to_tensor(initials[unique_p_indices], dtype=tf.float64), (-1, 1))
+        self.param_assign(self.initials)
 
         # Need to temporarily disable the vum so we can update so we can get the parts we need to make the new VUM.
         enable_vum = self.enable_vum
@@ -562,7 +596,8 @@ class ParametricTriangleOptic(TriangleOptic):
 
         if self.any_fixed:
             # If any vertices are fixed vertices, we need to add them in using gather_vertices
-            all_vertices = tf.concat((self.fixed_points, vertices), axis=0)
+            rotated_fixed_points = tf.convert_to_tensor(self.rotation.rotate(self.fixed_points), dtype=tf.float64)
+            all_vertices = tf.concat((rotated_fixed_points + self.translation, vertices), axis=0)
             vertices = tf.gather(all_vertices, self.gather_vertices, axis=0)
         return vertices
 
@@ -680,6 +715,119 @@ class ParametricTriangleOptic(TriangleOptic):
             if isinstance(c, qtw.QWidget) and self.driver.driver_type == "client":
                 self.controller_widgets.append(c)
         return constraints
+
+
+class ReparameterizablePlanarOptic(ParametricTriangleOptic):
+    """
+    Optic that can change its zero point mesh while preserving its shape.
+
+    This optic is only valid for surfaces that can be collapsed into one of the three coordinate planes (xy, yz, xz) and
+    be interpolated from that plane into 3D.  The zero points will live within the chosen coordinate plane and the
+    parameters will be built from a vector perpendicular to this plane.
+
+    This class derives from ParametricTriangleOptic and should implement its full interface.  This is class will behave
+    identically to a ParametricTriangleOptic until the remesh controls are used to change the underlying base mesh.
+
+    This mesh can adapt its parameters to the new shape of the zero points only while it is running.  It is not possible
+    to develop and save a set of parameters, remesh, and then load those parameters, because they will have the wrong
+    shape.  Thus the best practice for maintaining compatibility between old solutions and new mesh shapes is to save
+    the output mesh rather than the parameters, and load previous output meshes rather than previously saved parameters.
+    Of course, loading previous parameter sets does work so long as the shape of the mesh has not changed.
+    """
+    plane_lookup = {
+        "xy": (0, 1, 2, (0.0, 0.0, 1.0)),
+        "yz": (1, 2, 0, (1.0, 0.0, 0.0)),
+        "xz": (0, 2, 1, (0.0, 1.0, 0.0))
+    }
+
+    def __init__(
+        self,
+        driver,
+        system_path,
+        settings,
+        plane,
+        mesh_generator,
+        **kwargs
+    ):
+        """
+
+        Parameters
+        ----------
+
+        driver : client.OpticClientWindow
+            The top level client window.
+        system_path : str
+            The path to the parent directory of the optical script.
+        settings : dict or settings.Settings
+            The settings for this optical element.
+        plane : str
+            Must be 'xy', 'yz' or 'xz'.  The coordinate plane to use for projection / interpolation.
+        mesh_generator : str or MeshGenerator.
+            This object controls how new meshes are generated.  It may be a string, in which case a built-in generator
+            will be used.  Valid built-in values are:
+            'circle': mesh_tools.circular_mesh is used to generate the zero point mesh.
+            'square': pyvista.Plane is used to generate the zero point mesh.
+            Or it can be a custom MeshGenerator.
+        kwargs :
+            All remaining kwargs are passed to ParametricTriangleOptic.
+        """
+        try:
+            self.c1, self.c2, self.c3, plane_n = self.plane_lookup[plane]
+        except KeyError as e:
+            raise ValueError("ReparameterizablePlanarOptic: plane must be 'xy', 'yz', or 'xz'.") from e
+        vector_generator = FromVectorVG(plane_n)
+
+        if type(mesh_generator) is str:
+            if mesh_generator == "circle":
+                self.mesh_generator = CircleMeshGenerator(self)
+            elif mesh_generator == "square":
+                self.mesh_generator = SquareMeshGenerator(self)
+            else:
+                raise ValueError(
+                    f"ReparameterizablePlanarOptic: {mesh_generator} is not a valid built-in option for mesh_generator."
+                )
+        elif isinstance(mesh_generator, MeshGenerator):
+            self.mesh_generator = mesh_generator
+        else:
+            raise ValueError(
+                "ReparameterizablePlanarOptic: mesh_generator must be a string and valid name for a built-in "
+                "generator or an instance of MeshGenerator."
+            )
+
+        super().__init__(driver, system_path, settings, vector_generator, **kwargs)
+        self.controller_widgets.append(self.mesh_generator.get_ui_widget())
+
+    def remesh(self, new_zero_mesh):
+        self.tcp_ack_remeshed = True
+        self.p_controller_ack_remeshed = True
+
+        # Remove the transformations.  Save them to re-apply at the end
+        saved_translation = self.settings.translation
+        self.settings.translation = np.array((0.0, 0.0, 0.0), dtype=np.float64)
+        self.update_translation(False)
+        saved_rotation = self.settings.rotation
+        self.settings.rotation = TriangleOptic.BASE_ORIENTATION.copy()
+        self.update_rotation(False)
+        self.update()
+
+        # Project and extract the shape of the surface, and interpolate.
+        x, y, z = (self.vertices[:, c].numpy() for c in (self.c1, self.c2, self.c3))
+        interpolation = scipy.interpolate.LinearNDInterpolator((x, y), z, 0)
+        new_zero_x, new_zero_y = new_zero_mesh.points[:, self.c1], new_zero_mesh.points[:, self.c2]
+
+        new_initials = interpolation((new_zero_x, new_zero_y))
+        new_initials = tf.convert_to_tensor(new_initials, dtype=tf.float64)
+
+        # Rebuild the optic.
+        self.from_mesh(new_zero_mesh, new_initials)
+
+        # Re-apply the transformations
+        self.settings.translation = saved_translation
+        self.update_translation(False)
+        self.settings.rotation = saved_rotation
+        self.update_rotation(False)
+        self.update()
+        self.redraw()
 
 
 # ======================================================================================================================
@@ -1257,3 +1405,125 @@ class SpacingConstraint(qtw.QWidget):
         diff = self._reduce(component.parameters - target - self.settings.distance_constraint)
         diff = tf.broadcast_to(diff, component.parameters.shape)
         component.param_assign_sub(diff)
+
+
+# ======================================================================================================================
+
+
+class MeshGenerator(abc.ABC):
+    def __init__(self, optic, max_ui_cols=12):
+        self.optic = optic
+        self.max_ui_cols = max_ui_cols
+        self.remesh_button = qtw.QPushButton("Remesh")
+
+    def get_ui_widget(self):
+        widget = qtw.QWidget()
+        layout = qtw.QGridLayout()
+        layout.setContentsMargins(11, 11, 0, 11)
+        widget.setLayout(layout)
+
+        ui_row = 0
+        layout.addWidget(self.remesh_button, ui_row, 0, 1, self.max_ui_cols)
+        self.remesh_button.clicked.connect(self._remesh)
+        ui_row += 1
+
+        self.make_ui_widget(layout, ui_row)
+        return widget
+
+    @abc.abstractmethod
+    def make_ui_widget(self, layout, ui_row):
+        """
+        Define the remeshing parameters and populate a qt layout with controls that interface with them.
+
+        Parameters
+        ----------
+        layout : qtw.QGridLayout
+            The qtw.QGridLayout that makes up the base widget.  Controls are placed into this layout.
+        ui_row : int
+            The row at which to start placing widgets.  The remesh button is placed on row 0, and I have adapted
+            this practice of keeping track of the row in a variable to make it easier to develop grid UIs.
+
+        """
+        return NotImplementedError
+
+    @abc.abstractmethod
+    def get_new_mesh(self):
+        """
+        Generate (and return) a new pyvista mesh to use as the new zero points for the optic.
+        """
+        return NotImplementedError
+
+    def _remesh(self):
+        self.optic.remesh(self.get_new_mesh())
+
+
+class CircleMeshGenerator(MeshGenerator):
+    def make_ui_widget(self, layout, ui_row):
+        self.optic.settings.establish_defaults(
+            remesh_radius=1.0,
+            remesh_target_edge_size=.1
+        )
+
+        layout.addWidget(cw.SettingsEntryBox(
+            self.optic.settings,
+            "remesh_radius",
+            float,
+            qtg.QDoubleValidator(1e-6, 1e6, 8),
+        ), ui_row, 0, 1, 6)
+        layout.addWidget(cw.SettingsEntryBox(
+            self.optic.settings,
+            "remesh_target_edge_size",
+            float,
+            qtg.QDoubleValidator(1e-6, 1e6, 8),
+        ), ui_row, 6, 1, 6)
+
+    def get_new_mesh(self):
+        return mt.circular_mesh(
+            self.optic.settings.remesh_radius,
+            self.optic.settings.remesh_target_edge_size
+        )
+
+
+class SquareMeshGenerator(MeshGenerator):
+    def make_ui_widget(self, layout, ui_row):
+        self.optic.settings.establish_defaults(
+            remesh_i_size=1.0,
+            remesh_j_size=1.0,
+            remesh_i_resolution=5,
+            remesh_j_resolution=5
+        )
+
+        layout.addWidget(cw.SettingsEntryBox(
+            self.optic.settings,
+            "remesh_i_size",
+            float,
+            qtg.QDoubleValidator(1e-6, 1e6, 8),
+        ), ui_row, 0, 1, 6)
+        layout.addWidget(cw.SettingsEntryBox(
+            self.optic.settings,
+            "remesh_j_size",
+            float,
+            qtg.QDoubleValidator(1e-6, 1e6, 8),
+        ), ui_row, 6, 1, 6)
+        ui_row += 1
+
+        layout.addWidget(cw.SettingsEntryBox(
+            self.optic.settings,
+            "remesh_i_resolution",
+            int,
+            qtg.QIntValidator(2, int(1e6)),
+        ), ui_row, 0, 1, 6)
+        layout.addWidget(cw.SettingsEntryBox(
+            self.optic.settings,
+            "remesh_j_resolution",
+            int,
+            qtg.QIntValidator(2, int(1e6)),
+        ), ui_row, 6, 1, 6)
+
+    def get_new_mesh(self):
+        return pv.Plane(
+            i_size=self.optic.settings.remesh_i_size,
+            j_size=self.optic.settings.remesh_j_size,
+            i_resolution=self.optic.settings.remesh_i_resolution,
+            j_resolution=self.optic.settings.remesh_j_resolution
+        ).triangulate()
