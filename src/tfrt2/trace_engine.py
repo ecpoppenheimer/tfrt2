@@ -1051,7 +1051,7 @@ def trace_sample_while_body(
     )
 
 
-#@tf.function #  TODO see if this tf.function tag can be added back.  I am not sure it will work in principle, and anyway it crashes because of shape errors that do not exist in eager mode.
+@tf.function
 def precompiled_trace_loop(
     ray_start, ray_hat, ray_n, ray_meta,
     boundary_p, boundary_u, boundary_v, boundary_norms, metadata,

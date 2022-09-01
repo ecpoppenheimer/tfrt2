@@ -413,10 +413,6 @@ class CPlaneGoal:
         # Slicing and projection constants, that will move the 3D finished ray points into the 2D plane of the goal.
         self._slice_1 = tf.constant(a1, dtype=tf.int32)
         self._slice_2 = tf.constant(a2, dtype=tf.int32)
-        """self._s1_clip_low = tf.constant(self.settings.c1_min, dtype=tf.float64)
-        self._s1_clip_high = tf.constant(self.settings.c1_max, dtype=tf.float64)
-        self._s2_clip_low = tf.constant(self.settings.c2_min, dtype=tf.float64)
-        self._s2_clip_high = tf.constant(self.settings.c2_max, dtype=tf.float64)""" #TODO remove after testing
         self._s1_clip_low = tf.constant(self.settings.c1_clip_min, dtype=tf.float64)
         self._s1_clip_high = tf.constant(self.settings.c1_clip_max, dtype=tf.float64)
         self._s2_clip_low = tf.constant(self.settings.c2_clip_min, dtype=tf.float64)
