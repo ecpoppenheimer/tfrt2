@@ -13,6 +13,7 @@ import sys
 import traceback
 import threading
 import signal
+import time
 
 import PyQt5.QtWidgets as qtw
 import PyQt5.QtCore as qtc
@@ -20,6 +21,8 @@ import PyQt5.QtGui as qtg
 import pyvistaqt as pvqt
 import matplotlib.pyplot as plt
 import matplotlib as mpl
+import numpy as np
+import pyvista as pv
 
 import tfrt2.drawing as drawing
 import tfrt2.settings as settings
@@ -27,6 +30,7 @@ import tfrt2.component_widgets as component_widgets
 import tfrt2.wavelength as wavelength
 import tfrt2.optics as optics
 import tfrt2.client_TCP_widget as tcp_widget
+import tfrt2.mesh_tools as mt
 from tfrt2.remote_controls import RemotePane
 from tfrt2.optimize import OptimizationPane
 from tfrt2_client.parameter_controller import ParameterControls
@@ -77,6 +81,7 @@ class OpticClientWindow(qtw.QWidget):
         self.ui.retrace_button = qtw.QPushButton("Re-trace")
         self.ui.retrace_button.setEnabled(False)
         self.tcp_widget = tcp_widget.ClientTCPWidget(self)
+        self._debug_mode = False
 
         # Illuminance plot
         plt.style.use("dark_background")
@@ -168,6 +173,11 @@ class OpticClientWindow(qtw.QWidget):
         self.settings.establish_defaults(auto_retrace=2)
         retrace_toggle.setCheckState(self.settings.auto_retrace)
         update_layout.addWidget(retrace_toggle)
+
+        if self._debug_mode:
+            test_button = qtw.QPushButton("Debug/Test")
+            test_button.clicked.connect(self.debug_test)
+            update_layout.addWidget(test_button)
 
         # The TCP client widget
         control_layout.addWidget(self.tcp_widget)
@@ -385,6 +395,46 @@ class OpticClientWindow(qtw.QWidget):
         ))
         self.ui.illuminance_widget.ax.set_xlim(a_x_min, a_x_max)
         self.ui.illuminance_widget.ax.set_ylim(a_y_min, a_y_max)
+
+    def debug_test(self):
+        """start_time = time.time()
+        print(f"doing my ray trace...")
+        self.optical_system.update()
+        self.optical_system.precompile_trace_samples(self.settings.trace_depth)
+        end_time = time.time()
+        print(f"completed in {end_time - start_time} s")
+        start_time = end_time
+
+        # Begin of using pv's multi ray trace, which itself is based on Intel's Embry.
+        self.optical_system.update()
+
+        # Will have to do a custom fuse boundaries...
+        boundaries = self.optical_system.opticals + self.optical_system.stops + self.optical_system.targets
+        vertices = []
+        v_count = 0
+        faces = []
+        if boundaries:
+            for boundary in boundaries:
+                faces.append(boundary.faces + v_count)
+                vertices.append(boundary.vertices)
+                v_count += boundary.vertices.shape[0]
+        vertices = np.concatenate(vertices, axis=0)
+        faces = np.concatenate(faces, axis=0)
+        full_mesh = pv.PolyData(vertices, mt.pack_faces(faces))
+
+        i_points, i_rays, i_cells = full_mesh.multi_ray_trace(
+            self.optical_system.source_rays.s, self.optical_system.source_rays.hat, first_point=True
+        )
+
+        print(f"total rays: {self.optical_system.source_rays.s.shape[0]}")
+        print(f"i_points: {i_points.shape}")
+        print(f"i_rays: {i_rays.shape}")
+        print(f"i_cells: {i_cells.shape}")
+        end_time = time.time()
+        print(f"completed in {end_time - start_time} s")
+        print(f"----------------------------")
+        """
+        pass
 
 
 class UpdateRaysSignal(qtc.QObject):

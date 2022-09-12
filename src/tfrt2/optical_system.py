@@ -66,7 +66,6 @@ class OpticalSystem(TraceEngine3D):
         self.targets = []
         self.sources = []
         self.parametric_optics = []
-        self.parameters = []
 
         # parts, index-able by name
         self.parts = {}
@@ -99,7 +98,6 @@ class OpticalSystem(TraceEngine3D):
             part.name = name
             if hasattr(part, "parameters"):
                 self.parametric_optics.append(part)
-                self.parameters.append(part.parameters)
 
     def feed_part(self, name, part):
         try:
@@ -110,7 +108,6 @@ class OpticalSystem(TraceEngine3D):
         part.name = name
         if hasattr(part, "parameters"):
             self.parametric_optics.append(part)
-            self.parameters.append(part.parameters)
 
     def set_goal(self, goal):
         if self.goal is not None:
@@ -171,4 +168,8 @@ class OpticalSystem(TraceEngine3D):
     def post_init(self):
         if self.goal is not None:
             self.goal.try_update_target()
+
+    @property
+    def parameters(self):
+        return tuple(c.parameters for c in self.parametric_optics)
 

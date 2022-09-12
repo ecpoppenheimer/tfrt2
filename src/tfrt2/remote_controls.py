@@ -155,7 +155,6 @@ class RemotePane(qtw.QWidget):
                 )
             else:
                 ilum_settings = (self.parent_client.settings.ray_count_factor,)
-            print(f"requesting illuminance plot with {self.parent_client.settings.rq_illum_ray_count} rays")
             self.parent_client.tcp_widget.set_status("Measuring Illuminance.", 0, 1)
             self.server_socket.write(tcp.CLIENT_RQST_ILUM, pickle.dumps(ilum_settings))
 

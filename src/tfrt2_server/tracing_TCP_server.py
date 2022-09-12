@@ -63,12 +63,12 @@ class TraceServer(qtn.QTcpServer):
             tcp.CLIENT_FTP: self.receive_ftp,
             tcp.CLIENT_LOAD_SYSTEM: self.refresh_system,
             tcp.CLIENT_RQST_TRACE: self.ray_trace_for_client,
-            tcp.CLIENT_PARAMS: self.receive_parameters,
             tcp.CLIENT_RQST_ILUM: self.measure_illuminance,
             tcp.CLIENT_RESET_SYS: self.reset_system,
             tcp.CLIENT_ABORT_PROCS: self.abort_processing,
             tcp.CLIENT_SINGLE_STEP: self.single_step,
-            tcp.CLIENT_REMESH: self.remesh
+            tcp.CLIENT_SYNC_OPTIC: self.sync_optic,
+            tcp.CLIENT_FINAL_SYNC: self.finalize_sync
         }
 
         # Make a performance tracer, which will organize the process of doing various high-throughput computing
@@ -247,6 +247,7 @@ class TraceServer(qtn.QTcpServer):
 
             self.client_socket.write(tcp.SERVER_SYS_L_ACK, tcp.TRUE)
         except Exception:
+            print(f"did this")
             self.client_socket.write(tcp.SERVER_SYS_L_ACK, tcp.FALSE)
             self.send_nonfatal_error("refreshing system")
 
@@ -298,23 +299,6 @@ class TraceServer(qtn.QTcpServer):
 
     def ray_trace_for_client(self, data):
         self.engine.queue_job("full_ray_trace", pickle.loads(data))
-
-    def receive_parameters(self, data):
-        if self.engine.try_wait():
-            self.client_socket.write(tcp.SERVER_PARAM_ACK, tcp.FALSE)
-            self.send_nonfatal_error("receiving parameters, server was busy")
-            return
-
-        try:
-            if self.optical_system:
-                for key, value in pickle.loads(data).items():
-                    self.optical_system.parts[key].param_assign(value)
-            else:
-                self.cached_parameters = pickle.loads(data)
-            self.client_socket.write(tcp.SERVER_PARAM_ACK, tcp.TRUE)
-        except Exception:
-            self.client_socket.write(tcp.SERVER_PARAM_ACK, tcp.FALSE)
-            self.send_nonfatal_error("receiving parameters")
 
     def measure_illuminance(self, data):
         settings = pickle.loads(data)
@@ -369,22 +353,36 @@ class TraceServer(qtn.QTcpServer):
         self.clean_temp()
         self.engine.shut_down()
 
-    def remesh(self, data):
-        name, points, faces = pickle.loads(data)
-
+    def sync_optic(self, data):
+        name, points, faces, parameters = pickle.loads(data)
         if self.engine.try_wait():
-            self.client_socket.write(tcp.SERVER_REMESH_ACK, pickle.dumps((False, name)))
-            self.send_nonfatal_error(f"remeshing {name}, server was busy")
+            self.send_data(tcp.SERVER_SYNC_OP_ACK, pickle.dumps((False, name)))
+            self.send_nonfatal_error(f"syncing component {name}: server was busy")
             return
 
         try:
-            if self.optical_system:
-                self.optical_system.parts[name].remesh(pv.PolyData(points, faces))
-            self.client_socket.write(tcp.SERVER_REMESH_ACK, pickle.dumps((True, name)))
-        except Exception:
-            self.client_socket.write(tcp.SERVER_REMESH_ACK, pickle.dumps((False, name)))
-            self.send_nonfatal_error(f"remeshing {name}")
+            new_mesh = pv.PolyData(points, faces)
+            component = self.optical_system.parts[name]
+            component.from_mesh(new_mesh)
+            component.param_assign(parameters)
 
+            self.send_data(tcp.SERVER_SYNC_OP_ACK, pickle.dumps((True, name)))
+        except Exception:
+            self.send_data(tcp.SERVER_SYNC_OP_ACK, pickle.dumps((False, name)))
+            self.send_nonfatal_error(f"syncing component {name}")
+
+    def finalize_sync(self, _):
+        if self.engine.try_wait():
+            self.send_data(tcp.SERVER_ACK_S_FINAL, tcp.FALSE)
+            self.send_nonfatal_error(f"finalization: server was busy")
+            return
+
+        try:
+            self.optical_system.update_compute_grad()
+            self.send_data(tcp.SERVER_ACK_S_FINAL, tcp.TRUE)
+        except Exception:
+            self.send_data(tcp.SERVER_ACK_S_FINAL, tcp.FALSE)
+            self.send_nonfatal_error(f"finalization")
 
 
 class BusySignal(qtc.QObject):

@@ -617,37 +617,19 @@ class ParametricTriangleOptic(TriangleOptic):
                 constraint(self)
 
     def param_assign(self, val):
-        try:
-            self.parameters.assign(val)
-            if self._qt_compat:
-                self.parameters_updated.sig.emit()
-        except ValueError:
-            print(
-                "ParametricTriangleOptic: Tried to assign params of the wrong shape.  This might be possible with a "
-                "reparametrizable optic instead."
-            )
+        self.parameters.assign(val)
+        if self._qt_compat:
+            self.parameters_updated.sig.emit()
 
     def param_assign_sub(self, val):
-        try:
-            self.parameters.assign_sub(val)
-            if self._qt_compat:
-                self.parameters_updated.sig.emit()
-        except ValueError:
-            print(
-                "ParametricTriangleOptic: Tried to assign_sub params of the wrong shape.  This might be possible "
-                "with a reparametrizable optic instead."
-            )
+        self.parameters.assign_sub(val)
+        if self._qt_compat:
+            self.parameters_updated.sig.emit()
 
     def param_assign_add(self, val):
-        try:
-            self.parameters.assign_add(val)
-            if self._qt_compat:
-                self.parameters_updated.sig.emit()
-        except ValueError:
-            print(
-                "ParametricTriangleOptic: Tried to assign_add params of the wrong shape.  This might be possible "
-                "with a reparametrizable optic instead."
-            )
+        self.parameters.assign_add(val)
+        if self._qt_compat:
+            self.parameters_updated.sig.emit()
 
     def try_vum(self, first_points, second_points, third_points):
         if not self.enable_vum:
@@ -717,7 +699,7 @@ class ParametricTriangleOptic(TriangleOptic):
         return constraints
 
 
-class ReparameterizablePlanarOptic(ParametricTriangleOptic):
+class ReparameterizableTriangleOpticBase(ParametricTriangleOptic):
     """
     Optic that can change its zero point mesh while preserving its shape.
 
@@ -810,6 +792,24 @@ class ReparameterizablePlanarOptic(ParametricTriangleOptic):
         self.update_rotation(False)
         self.update()
 
+        self.remesh_core(new_zero_mesh)
+
+        # Re-apply the transformations
+        self.settings.translation = saved_translation
+        self.update_translation(False)
+        self.settings.rotation = saved_rotation
+        self.update_rotation(False)
+        self.update()
+        self.redraw()
+
+    def remesh_core(self, new_zero_mesh):
+        raise NotImplementedError(
+            "Cannot use ReparameterizableTriangleOpticBase - it is a base class.  Used a derived class instead."
+        )
+
+
+class ReparameterizablePlanarOptic(ReparameterizableTriangleOpticBase):
+    def remesh_core(self, new_zero_mesh):
         # Project and extract the shape of the surface, and interpolate.
         x, y, z = (self.vertices[:, c].numpy() for c in (self.c1, self.c2, self.c3))
         interpolation = scipy.interpolate.LinearNDInterpolator((x, y), z, 0)
@@ -820,14 +820,6 @@ class ReparameterizablePlanarOptic(ParametricTriangleOptic):
 
         # Rebuild the optic.
         self.from_mesh(new_zero_mesh, new_initials)
-
-        # Re-apply the transformations
-        self.settings.translation = saved_translation
-        self.update_translation(False)
-        self.settings.rotation = saved_rotation
-        self.update_rotation(False)
-        self.update()
-        self.redraw()
 
 
 # ======================================================================================================================

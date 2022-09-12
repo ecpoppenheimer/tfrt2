@@ -31,6 +31,7 @@ class TraceEngine3D:
         self._size_epsilon = tf.constant(1e-10, dtype=tf.float64)
         self._ray_start_epsilon = tf.constant(1e-10, dtype=tf.float64)
 
+        self._compute_grad = None
         self.optimizer = tf.keras.optimizers.SGD(1.0, 0.0, True)
 
     def clear_rays(self, clear_sources=True):
@@ -328,7 +329,7 @@ class TraceEngine3D:
 
         return (finished_s, finished_hat, finished_meta), grad_stats
 
-    @tf.function(input_signature=[
+    """@tf.function(input_signature=[
         tf.TensorSpec(shape=(None, 3), dtype=tf.float64),
         tf.TensorSpec(shape=(None, 3), dtype=tf.float64),
         tf.TensorSpec(shape=(None, None), dtype=tf.float64),
@@ -342,22 +343,57 @@ class TraceEngine3D:
         with tf.GradientTape() as tape:
             # Trace the system.  This is a tf.function decorated sub function, which MAY NOT WORK WITH THE TAPE!!!
             self.update_optics()
+            p, u, v, boundary_norm, boundary_meta = self.fuse_boundaries()
+            tf.print("compute grad...")
+            tf.print("s: ", tf.shape(s))
+            tf.print("p: ", tf.shape(p))
+            tf.print("trig_map: ", tf.shape(trig_map))
+            tf.print("---------------")
             finished_s, finished_hat, finished_meta = precompiled_trace_loop(
-                s,
-                hat,
-                n,
-                meta,
-                *self.fuse_boundaries(),
+                s, hat, n, meta,
+                p, u, v, boundary_norm, boundary_meta,
                 trig_map,
                 tm_indices,
                 trace_depth,
                 self.intersect_epsilon,
                 self.new_ray_length
             )
-
             traced_output = finished_s + finished_hat
             error = self.goal.error_function(traced_output, goal)
+
         return tape.gradient(error, self.parameters), finished_s, finished_hat, finished_meta
+    """
+
+    def update_compute_grad(self):
+        @tf.function
+        def _compute_grad_core(s, hat, n, meta, trig_map, tm_indices, trace_depth, goal):
+            with tf.GradientTape() as tape:
+                # Trace the system.  This is a tf.function decorated sub function, which MAY NOT WORK WITH THE TAPE!!!
+                self.update_optics()
+                p, u, v, boundary_norm, boundary_meta = self.fuse_boundaries()
+                finished_s, finished_hat, finished_meta = precompiled_trace_loop(
+                    s, hat, n, meta,
+                    p, u, v, boundary_norm, boundary_meta,
+                    trig_map,
+                    tm_indices,
+                    trace_depth,
+                    self.intersect_epsilon,
+                    self.new_ray_length
+                )
+                traced_output = finished_s + finished_hat
+                error = self.goal.error_function(traced_output, goal)
+
+            return tape.gradient(error, self.parameters), finished_s, finished_hat, finished_meta
+        self._compute_grad = _compute_grad_core.get_concrete_function(
+            tf.TensorSpec(shape=(None, 3), dtype=tf.float64),
+            tf.TensorSpec(shape=(None, 3), dtype=tf.float64),
+            tf.TensorSpec(shape=(None, None), dtype=tf.float64),
+            tf.TensorSpec(shape=(None, 1), dtype=tf.int32),
+            tf.TensorSpec(shape=(None,), dtype=tf.int32),
+            tf.TensorSpec(shape=(None,), dtype=tf.int32),
+            tf.TensorSpec(shape=(), dtype=tf.int32),
+            tf.TensorSpec(shape=(None, 3), dtype=tf.float64),
+        )
 
     @staticmethod
     def _process_grad(g, learning_rate, part, clip_high, clip_low, do_smooth):

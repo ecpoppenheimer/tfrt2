@@ -58,6 +58,7 @@ class ClientTCPWidget(qtw.QWidget):
         self.completed_sync_tasks = 0
         self.waiting_for_server_reset = False
         self.waiting_to_send_system = False
+        self.sync_has_failed = False
 
         # A lookup table of methods to call to process the data contained in various messages
         self.message_LUT = {
@@ -69,7 +70,6 @@ class ClientTCPWidget(qtw.QWidget):
             tcp.SERVER_SYS_L_ACK: self.server_system_load_ack,
             tcp.SERVER_TRACE_RSLT: self.client.remote_pane.receive_ray_trace_results,
             tcp.SERVER_PARAMS: self.receive_parameters,
-            tcp.SERVER_PARAM_ACK: self.server_params_ack,
             tcp.SERVER_MESSAGE: self.print_server_message,
             tcp.SERVER_ILUM: self.client.remote_pane.receive_illuminance,
             tcp.SERVER_SYS_RST_ACK: self.server_ack_sys_reset,
@@ -78,7 +78,8 @@ class ClientTCPWidget(qtw.QWidget):
             tcp.SERVER_FLATTENER: self.feed_flattener,
             tcp.SERVER_SINGLE_STEP: self.client.optimize_pane.receive_single_step,
             tcp.SERVER_ST_UPDATE: self.receive_status_update,
-            tcp.SERVER_REMESH_ACK: self.server_remesh_ack
+            tcp.SERVER_SYNC_OP_ACK: self.server_ack_optic,
+            tcp.SERVER_ACK_S_FINAL: self.server_finalize_sync_ack
         }
 
         # Establish settings defaults
@@ -315,18 +316,14 @@ class ClientTCPWidget(qtw.QWidget):
         self.waiting_to_send_system = False
 
         if self.client.optical_system is not None and self.server_socket.validated:
+            self.sync_has_failed = False
             self.clean_sync_stuff()
+            self.sync_button.setEnabled(True)
             self.abort_button.setEnabled(True)
             self.set_status("Sync pending.")
 
             self.add_sync_task("driver_settings", self.get_clean_driver_settings())
             self.add_sync_task("system_settings", self.get_clean_system_settings())
-            for component in self.client.optical_system.parametric_optics:
-                if component.tcp_ack_remeshed:
-                    component.tcp_ack_remeshed = False
-                    self.add_sync_task("remesh", component.name, component.base_mesh)
-
-            self.add_sync_task("send_parameters")
             self.add_sync_task("system_load")
 
             # Send the script.  This command checks to make sure it is needed (changed or not already sent).
@@ -344,8 +341,6 @@ class ClientTCPWidget(qtw.QWidget):
         self.total_sync_tasks = 0
         self.completed_sync_tasks = 0
         self.abort_button.setEnabled(False)
-
-
         for v in self.sync_tasks.values():
             v.deleteLater()
         self.sync_tasks.clear()
@@ -363,12 +358,18 @@ class ClientTCPWidget(qtw.QWidget):
             title, key = "Load system", "system_load"
             # Don't actually send this command, let _server_ack handle that once all other commands have been
             # acknowledged.
-        elif mode == "send_parameters":
-            title, key = "Transfer Parameters", "send_parameters"
-            self.send_parameters()
-        elif mode == "remesh":
-            title, key = f"Remesh {args[0]}", f"remesh {args[0]}"
-            self.send_remesh(*args)
+        elif mode == "finalize":
+            title, key = "Finalize loading", "finalize"
+            # Don't actually send this command, let _server_ack do it.
+        elif mode == "sync_optic":
+            component = args[0]
+            title, key = f"Sync component {component.name}", f"sync_{component.name}"
+            self.server_socket.write(tcp.CLIENT_SYNC_OPTIC, pickle.dumps((
+                component.name,
+                component.base_mesh.points,
+                component.base_mesh.faces,
+                component.parameters.numpy()
+            )))
         elif mode == "file_transfer":
             local_filename = Path(args[1])
             title, key = "FTP " + str(local_filename.stem) + str(local_filename.suffix), args[0]
@@ -397,23 +398,33 @@ class ClientTCPWidget(qtw.QWidget):
             return
 
         self.completed_sync_tasks += 1
-        self.set_status("Sync pending.", self.completed_sync_tasks, self.total_sync_tasks)
+        if not self.sync_has_failed:
+            self.set_status("Sync pending.", self.completed_sync_tasks, self.total_sync_tasks)
         if status:
             label.deleteLater()
             self.sync_tasks.pop(context)
 
-            if context == "system_load":
-                self.set_status("Sync success.")
-            else:
-                # If we have exactly one task left, 'system_load', then it is time to sent the system load request.
-                # Don't do this if we received an error, because this could cause an infinite loop.
-                if len(self.sync_tasks) == 1:
-                    if tuple(self.sync_tasks.keys())[0] == "system_load":
-                        self.server_socket.write(tcp.CLIENT_LOAD_SYSTEM)
+            # If we have exactly one task left, then it is (hopefully) time to send either the system load
+            # or system finalize tasks.  Don't send either if an error has been thrown
+            if len(self.sync_tasks) == 1:
+                last_key = tuple(self.sync_tasks.keys())[0]
+                if last_key == "system_load":
+                    if self.sync_has_failed:
+                        self.sync_tasks["system_load"].setStyleSheet("background-color: pink;")
                     else:
-                        print("SyncError: ended up with just one sync_task, but it isn't system_load.")
+                        self.server_socket.write(tcp.CLIENT_LOAD_SYSTEM)
+                elif last_key == "finalize":
+                    if self.sync_has_failed:
+                        self.sync_tasks["finalize"].setStyleSheet("background-color: pink;")
+                    else:
+                        self.server_socket.write(tcp.CLIENT_FINAL_SYNC)
+            elif len(self.sync_tasks) == 0:
+                self.set_status("Sync Success")
+                self.abort_button.setEnabled(False)
+                self.sync_button.setEnabled(True)
         else:
             self.set_status("Sync failure.")
+            self.sync_has_failed = True
             label.setStyleSheet("background-color: pink;")
 
     def server_ack_driver_settings(self, data):
@@ -425,12 +436,21 @@ class ClientTCPWidget(qtw.QWidget):
     def server_ftp_ack(self, data):
         self._server_ack(*pickle.loads(data))
 
+    def server_ack_optic(self, data):
+        status, name = pickle.loads(data)
+        self._server_ack(status, f"sync_{name}")
+
     def server_params_ack(self, data):
         self._server_ack(pickle.loads(data), "send_parameters")
 
     def server_system_load_ack(self, data):
         self._server_ack(pickle.loads(data), "system_load")
-        self.abort_button.setEnabled(False)
+        for component in self.client.optical_system.parametric_optics:
+            self.add_sync_task("sync_optic", component)
+        self.add_sync_task("finalize")
+
+    def server_finalize_sync_ack(self, data):
+        self._server_ack(pickle.loads(data), "finalize")
 
     def get_clean_system_settings(self):
         clean_settings = {}
