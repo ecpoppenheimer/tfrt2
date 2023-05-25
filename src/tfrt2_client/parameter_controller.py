@@ -250,7 +250,7 @@ class ParameterControls(qtw.QWidget):
         if self.choose_singles.isChecked():
             selected = p_index
         elif self.choose_center.isChecked():
-            self.transform_center = self.selectable_component.base_mesh.points[p_index]
+            self.transform_center = self.selectable_component.tiled_base_mesh.points[p_index]
             selected = set()
         elif self.choose_neighbors.isChecked():
             #selected = set((p_index,))
@@ -278,23 +278,28 @@ class ParameterControls(qtw.QWidget):
             except TypeError:
                 self.selected_vertices.discard(selected)
 
-    def update_selection(self):
-        if self.selectable_component is None:
-            return
-        if self.selectable_component.p_controller_ack_remeshed:
-            self.handle_remesh()
+    def update_selection(self, avoid_recursion=False):
+        try:
+            if self.selectable_component is None:
+                return
+            if self.selectable_component.p_controller_ack_remeshed:
+                self.handle_remesh()
 
-        self.parent_client.plot.remove_actor(self._selected_mesh_actor)
-        if len(self.selected_vertices) > 0:
-            all_points = self.selectable_component.vertices.numpy()
-            self.selected_mesh = pv.PolyData(all_points[list(self.selected_vertices)])
-            self._selected_mesh_actor = self.parent_client.plot.add_mesh(
-                self.selected_mesh, render_points_as_spheres=True, color="yellow", point_size=10.0
-            )
-        self.selected_mask = np.array(tuple(
-            1.0 if i in self.selected_vertices else 0.0
-            for i in range(self.selectable_component.base_mesh.points.shape[0])
-        ))
+            self.parent_client.plot.remove_actor(self._selected_mesh_actor)
+            if len(self.selected_vertices) > 0:
+                all_points = self.selectable_component.vertices.numpy()
+                self.selected_mesh = pv.PolyData(all_points[list(self.selected_vertices)])
+                self._selected_mesh_actor = self.parent_client.plot.add_mesh(
+                    self.selected_mesh, render_points_as_spheres=True, color="yellow", point_size=10.0
+                )
+            self.selected_mask = np.array(tuple(
+                1.0 if i in self.selected_vertices else 0.0
+                for i in range(self.selectable_component.tiled_base_mesh.points.shape[0])
+            ))
+        except IndexError: # Attempt to fix a crash when the system is reloaded while vertices are selected, I think.
+            if self.selectable_component is not None and not avoid_recursion:
+                self.selected_vertices = set()
+                self.update_selection(True)
 
     def selector_changed(self, _):
         name = self.component_selector.currentText()
@@ -309,8 +314,8 @@ class ParameterControls(qtw.QWidget):
         else:
             self.selectable_component = self.parent_client.optical_system.parts[name]
             self.movable_indices = set(self.selectable_component.movable_indices)
-            self.distance_table = mt.mesh_distance_matrix(self.selectable_component.base_mesh)
-            self.neighbor_table = mt.mesh_neighbor_table(self.selectable_component.base_mesh)
+            self.distance_table = mt.mesh_distance_matrix(self.selectable_component.tiled_base_mesh)
+            self.neighbor_table = mt.mesh_neighbor_table(self.selectable_component.tiled_base_mesh)
 
     def filter(self, points):
         try:
@@ -376,7 +381,7 @@ class ParameterControls(qtw.QWidget):
             delta_v = self._rescale_slider(value) * self.selected_mask
         elif self.mode_gaussian.isChecked():
             all_v_distance = np.linalg.norm(
-                np.reshape(self.transform_center, (1, 3)) - self.selectable_component.base_mesh.points,
+                np.reshape(self.transform_center, (1, 3)) - self.selectable_component.tiled_base_mesh.points,
                 axis=1
             )
             sigma = float(self.gaussian_width.text())
@@ -419,7 +424,7 @@ class ParameterControls(qtw.QWidget):
     def auto_flatten(self):
         if self.selectable_component is None or len(self.selected_vertices) == 0:
             return
-        if len(self.selected_vertices) == self.selectable_component.base_mesh.points.shape[0]:
+        if len(self.selected_vertices) == self.selectable_component.tiled_base_mesh.points.shape[0]:
             print("Cannot flatten with all vertices selected!")
             return
         start_p = self.selectable_component.parameters.numpy()
@@ -486,7 +491,7 @@ class ParameterControls(qtw.QWidget):
         edge_to_face = {}
         starting_face = None
         starting_vertex = self.selected_vertices.pop()
-        faces = mt.unpack_faces(self.selectable_component.base_mesh.faces)
+        faces = mt.unpack_faces(self.selectable_component.tiled_base_mesh.faces)
         for f, face in zip(range(faces.shape[0]), faces):
             for i1, i2 in ((0, 1), (1, 2), (2, 0)):
                 edge = frozenset({face[i1], face[i2]})
@@ -561,16 +566,22 @@ class ParamUpdateAction(qtw.QUndoCommand):
         super().__init__()
 
     def redo(self):
-        self.component.param_assign(self.new_params)
-        self.component.update()
-        self.component.redraw()
-        self.param_controller.update_selection()
+        try:
+            self.component.param_assign(self.new_params)
+            self.component.update()
+            self.component.redraw()
+            self.param_controller.update_selection()
+        except ValueError:
+            print("Could not redo - parameter shape mismatch")
 
     def undo(self):
-        self.component.param_assign(self.old_params)
-        self.component.update()
-        self.component.redraw()
-        self.param_controller.update_selection()
+        try:
+            self.component.param_assign(self.old_params)
+            self.component.update()
+            self.component.redraw()
+            self.param_controller.update_selection()
+        except ValueError:
+            print("Could not redo - parameter shape mismatch")
 
 
 class ParameterController(qtw.QWidget):

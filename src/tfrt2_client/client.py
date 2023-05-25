@@ -203,7 +203,7 @@ class OpticClientWindow(qtw.QWidget):
             tab_selector.setCurrentIndex(self.settings.active_pane)
         except Exception:
             pass
-        #self.ui.pane_stack.setMaximumWidth(self.control_pane_width)
+        self.ui.pane_stack.setMaximumWidth(self.control_pane_width)
         control_layout.addWidget(self.ui.pane_stack)
 
         # Add a tabbed area to show visualizations
@@ -267,8 +267,8 @@ class OpticClientWindow(qtw.QWidget):
 
             self.redraw()
             self.try_auto_retrace()
-        except FileNotFoundError:
-            print("Invalid file")
+        except FileNotFoundError as e:
+            print(f"Invalid file: {e}")
             self.ui.loaded_label.setText("Current System: None")
             self.optical_system = None
             self.ui.retrace_button.setEnabled(False)
@@ -435,6 +435,12 @@ class OpticClientWindow(qtw.QWidget):
         print(f"----------------------------")
         """
         pass
+
+    def forward_remote_goal(self, data):
+        try:
+            self.optical_system.goal.draw_remote_goal(data)
+        except AttributeError as e:
+            print("Nonfatal error: " + str(e))
 
 
 class UpdateRaysSignal(qtc.QObject):
@@ -687,6 +693,10 @@ class TraceControls(qtw.QWidget):
     def clear_rays(self):
         self.ray_drawer.rays = None
         self.ray_drawer.draw()
+        try:
+            self.parent_client.optical_system.goal.clear_goal()
+        except Exception as e:
+            print("error trying to clear the goal lines" + str(e))
 
 
 def make_app():

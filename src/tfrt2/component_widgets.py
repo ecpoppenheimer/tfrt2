@@ -22,11 +22,11 @@ class SettingsEntryBox(qtw.QWidget):
         self.setLayout(layout)
 
         if label is None:
-            label = qtw.QLabel(str(key).replace("_", " "))
+            self.label = qtw.QLabel(str(key).replace("_", " "))
         else:
-            label = qtw.QLabel(str(label))
-        label.setSizePolicy(qtw.QSizePolicy.Minimum, qtw.QSizePolicy.Minimum)
-        layout.addWidget(label)
+            self.label = qtw.QLabel(str(label))
+        self.label.setSizePolicy(qtw.QSizePolicy.Minimum, qtw.QSizePolicy.Minimum)
+        layout.addWidget(self.label)
 
         self.edit_box = qtw.QLineEdit()
         layout.addWidget(self.edit_box)
@@ -59,10 +59,9 @@ class SettingsRangeBox(qtw.QWidget):
         self.high_key = high_key
         self.callback = callback
 
-        if label != "":
-            label = qtw.QLabel(label)
-            label.setSizePolicy(qtw.QSizePolicy.Minimum, qtw.QSizePolicy.Minimum)
-            layout.addWidget(label)
+        self.label = qtw.QLabel(label)
+        self.label.setSizePolicy(qtw.QSizePolicy.Minimum, qtw.QSizePolicy.Minimum)
+        layout.addWidget(self.label)
 
         self.low_entry = qtw.QLineEdit()
         layout.addWidget(self.low_entry)
@@ -212,9 +211,9 @@ class SettingsFileBox(qtw.QWidget):
 
 
 class SettingsComboBox(qtw.QWidget):
-    def __init__(self, component, label, settings_key, settings_options, callback=None):
+    def __init__(self, settings, label, settings_key, settings_options, callback=None):
         super().__init__()
-        self.component = component
+        self.settings = settings
         self.settings_key = settings_key
         self.settings_options = settings_options
 
@@ -226,7 +225,7 @@ class SettingsComboBox(qtw.QWidget):
         selector = qtw.QComboBox()
         layout.addWidget(selector)
         selector.addItems(settings_options)
-        selector.setCurrentIndex(settings_options.index(self.component.settings.dict[settings_key]))
+        selector.setCurrentIndex(settings_options.index(self.settings.dict[settings_key]))
         selector.currentIndexChanged.connect(self.set_setting)
 
         if callback is not None:
@@ -237,7 +236,7 @@ class SettingsComboBox(qtw.QWidget):
                 selector.currentIndexChanged.connect(callback)
 
     def set_setting(self, index):
-        self.component.settings.dict[self.settings_key] = self.settings_options[index]
+        self.settings.dict[self.settings_key] = self.settings_options[index]
 
 
 class SettingsVectorBox(qtw.QWidget):

@@ -11,6 +11,7 @@ import traceback
 import PyQt5.QtWidgets as qtw
 import PyQt5.QtGui as qtg
 import PyQt5.QtNetwork as qtn
+import numpy as np
 
 import tfrt2.tcp_base as tcp_base
 import tfrt2.component_widgets as cw
@@ -79,7 +80,8 @@ class ClientTCPWidget(qtw.QWidget):
             tcp.SERVER_SINGLE_STEP: self.client.optimize_pane.receive_single_step,
             tcp.SERVER_ST_UPDATE: self.receive_status_update,
             tcp.SERVER_SYNC_OP_ACK: self.server_ack_optic,
-            tcp.SERVER_ACK_S_FINAL: self.server_finalize_sync_ack
+            tcp.SERVER_ACK_S_FINAL: self.server_finalize_sync_ack,
+            tcp.SERVER_SEND_GOAL: self.client.forward_remote_goal
         }
 
         # Establish settings defaults
@@ -202,15 +204,27 @@ class ClientTCPWidget(qtw.QWidget):
         self.server_socket.connected.connect(self.got_connection)
 
     def got_connection(self):
-        self.server_socket = tcp_base.TcpDataPacker(
-            self.server_socket,
-            tcp_base.CLIENT_ACK,
-            tcp_base.SERVER_ACK
-        )
-        self.server_socket.disconnected.connect(self.disconnected)
-        self.server_socket.errorOccurred.connect(self.socket_error)
-        self.server_socket.data_ready.sig.connect(self.data_received)
-        self.server_socket.connection_validated.sig.connect(self.got_validation)
+        try:
+            self.server_socket = tcp_base.TcpDataPacker(
+                self.server_socket,
+                tcp_base.CLIENT_ACK,
+                tcp_base.SERVER_ACK
+            )
+            self.server_socket.disconnected.connect(self.disconnected)
+            self.server_socket.errorOccurred.connect(self.socket_error)
+            self.server_socket.data_ready.sig.connect(self.data_received)
+            self.server_socket.connection_validated.sig.connect(self.got_validation)
+        except Exception as e:
+            # connection failed for unknown reason
+            print(f"Unknown connection error: {e}")
+            try:
+                self.close_connection(self.DISCONNECTED_REMOTE)
+            except Exception:
+                pass
+            self.client.remote_pane.deactivate()
+            self.client.optimize_pane.deactivate()
+            self.set_processing_state(self.UNKNOWN)
+            self.set_status("Connection Error")
 
     def disconnected(self):
         self.close_connection(self.DISCONNECTED_REMOTE)
@@ -584,13 +598,12 @@ class ClientTCPWidget(qtw.QWidget):
 
     def feed_flattener(self, data):
         flattening_density = pickle.loads(data)
+        if not self.client.settings.rq_illum_override:
+            self.client.remote_pane.receive_illuminance(data)
         try:
-            flattener = self.client.optical_system.goal.flattening_icdf
-            flattener.clear_density()
-            flattener.accumulate_density(flattening_density)
-            flattener.compute(direction="inverse")
-        except AttributeError:
-            pass
+            self.client.optical_system.goal.feed_flatten_density(flattening_density)
+        except AttributeError as e:
+            print(f"error calling flattener: {e}")
 
     def set_status(self, text, current=None, high=None):
         if current is not None:

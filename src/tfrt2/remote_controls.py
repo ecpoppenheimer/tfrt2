@@ -78,7 +78,7 @@ class RemotePane(qtw.QWidget):
         )
 
         main_layout.addWidget(cw.SettingsCheckBox(
-            self.parent_client.settings, "rq_illum_override", "Over-ride goal settings"
+            self.parent_client.settings, "rq_illum_override", "Make Standalone Plot"
         ), self.ui_row, 4, 1, 3)
         main_layout.addWidget(cw.SettingsEntryBox(
             self.parent_client.settings, "rq_illum_ray_count", int, qtg.QIntValidator(1000, int(1e9)),
@@ -86,14 +86,16 @@ class RemotePane(qtw.QWidget):
         ), self.ui_row, 1, 1, 3)
         self.ui_row += 1
 
-        main_layout.addWidget(cw.SettingsEntryBox(
+        self.rq_illum_x_res = cw.SettingsEntryBox(
             self.parent_client.settings, "rq_illum_x_res", int, qtg.QIntValidator(4, 4096),
             label="X res"
-        ), self.ui_row, 1, 1, 3)
-        main_layout.addWidget(cw.SettingsEntryBox(
+        )
+        self.rq_illum_y_res = cw.SettingsEntryBox(
             self.parent_client.settings, "rq_illum_y_res", int, qtg.QIntValidator(4, 4096),
             label="Y res"
-        ), self.ui_row, 4, 1, 3)
+        )
+        main_layout.addWidget(self.rq_illum_x_res, self.ui_row, 1, 1, 3)
+        main_layout.addWidget(self.rq_illum_y_res, self.ui_row, 4, 1, 3)
         self.ui_row += 1
 
         self.rq_illum_x_lims = cw.SettingsRangeBox(
@@ -110,6 +112,19 @@ class RemotePane(qtw.QWidget):
         self.rq_illum_pull_lims_button.clicked.connect(self.pull_rq_illum_lims)
         main_layout.addWidget(self.rq_illum_pull_lims_button, self.ui_row, 5, 2, 2)
         self.ui_row += 2
+
+        remote_goal_label = qtw.QLabel(
+            "Request a remote trace with goal data from the remote system's computer goal, to make sure it matches"
+            "what the client displays."
+        )
+        remote_goal_label.setWordWrap(True)
+        main_layout.addWidget(remote_goal_label, self.ui_row, 0, 1, 7)
+        self.ui_row += 1
+
+        self.remote_goal_button = qtw.QPushButton("Remote Goal")
+        self.remote_goal_button.clicked.connect(self.request_remote_goal)
+        main_layout.addWidget(self.remote_goal_button, self.ui_row, 0, 1, 3)
+        self.ui_row += 1
 
     def try_activate(self, socket=None):
         if socket is not None:
@@ -160,8 +175,6 @@ class RemotePane(qtw.QWidget):
 
     def receive_illuminance(self, data):
         illuminance = pickle.loads(data)
-        if self.parent_client.optical_system.goal is not None:
-            self.parent_client.optical_system.goal.feed_flatten(illuminance)
         self.parent_client.ui.illuminance_widget.set_data(illuminance, self.get_extents())
         self.parent_client.draw_illuminance_box(self.get_extents(), self.get_goal_box())
         self.parent_client.ui.illuminance_widget.draw()
@@ -199,3 +212,14 @@ class RemotePane(qtw.QWidget):
     def receive_ray_trace_results(self, data):
         self.parent_client.optical_system.feed_raysets(pickle.loads(data))
         self.parent_client.trace_pane.redraw()
+
+    def update_labels(self, c1, c2):
+        self.rq_illum_x_lims.label.setText(f"{c1} Extents")
+        self.rq_illum_y_lims.label.setText(f"{c2} Extents")
+        self.rq_illum_x_res.label.setText(f"{c1} res")
+        self.rq_illum_y_res.label.setText(f"{c2} res")
+
+    def request_remote_goal(self):
+        if self._active:
+            self.parent_client.tcp_widget.set_status("Requesting Remote Goal", 0, 1)
+            self.server_socket.write(tcp.CLIENT_GET_GOAL)

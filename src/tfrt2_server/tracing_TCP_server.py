@@ -68,7 +68,8 @@ class TraceServer(qtn.QTcpServer):
             tcp.CLIENT_ABORT_PROCS: self.abort_processing,
             tcp.CLIENT_SINGLE_STEP: self.single_step,
             tcp.CLIENT_SYNC_OPTIC: self.sync_optic,
-            tcp.CLIENT_FINAL_SYNC: self.finalize_sync
+            tcp.CLIENT_FINAL_SYNC: self.finalize_sync,
+            tcp.CLIENT_GET_GOAL: self.get_goal
         }
 
         # Make a performance tracer, which will organize the process of doing various high-throughput computing
@@ -247,7 +248,6 @@ class TraceServer(qtn.QTcpServer):
 
             self.client_socket.write(tcp.SERVER_SYS_L_ACK, tcp.TRUE)
         except Exception:
-            print(f"did this")
             self.client_socket.write(tcp.SERVER_SYS_L_ACK, tcp.FALSE)
             self.send_nonfatal_error("refreshing system")
 
@@ -383,6 +383,9 @@ class TraceServer(qtn.QTcpServer):
         except Exception:
             self.send_data(tcp.SERVER_ACK_S_FINAL, tcp.FALSE)
             self.send_nonfatal_error(f"finalization")
+
+    def get_goal(self, _):
+        self.engine.queue_job("get_goal")
 
 
 class BusySignal(qtc.QObject):

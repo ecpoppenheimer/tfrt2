@@ -63,6 +63,7 @@ class PerformanceTracer:
             "illuminance_plot": self._illuminance_plot,
             "full_ray_trace": self._full_ray_trace,
             "single_step": self._single_step,
+            "get_goal": self._get_goal
         }
 
         # analyze the system and define the devices to use.  Each device will get its own process.  GPUs are
@@ -254,15 +255,20 @@ class PerformanceTracer:
                 if type(r) is np.ndarray:
                     processed_results.append(r)
 
+            # full_results will be an array of the 3D coordinate of every ray endpoint. (shape = (:, 3) ).
+            # If a goal exists, we should use it to project the points into the goal plane.  Otherwise just have
+            # to histogram the points raw.
             full_results = np.concatenate(processed_results, axis=0)
+
             if standalone_plot:
                 # Always make our own histogram, if standalone_plot was requested.  It could be a repeat of the
                 # operations to build the flattener, down below, but I don't think it is worth the trouble to check
                 # whether all the parameters between this plot and that plot are the same, which is what it would take
                 # to use the results in both locations.
+                projected_results = self.optical_system.goal.project(full_results)
                 histo, _, _ = np.histogram2d(
-                    full_results[:, 0],
-                    full_results[:, 1],
+                    projected_results[:, 0],
+                    projected_results[:, 1],
                     bins=(x_res, y_res),
                     range=((x_min, x_max), (y_min, y_max))
                 )
@@ -505,6 +511,28 @@ class PerformanceTracer:
             )
         except Exception:
             self.nonfatal_error("single step")
+
+    def _get_goal(self):
+        try:
+            results = self._sub_job_management(1, 1.0, "fast", "Obtaining Remote Goal.")
+            if results is None:
+                return
+
+            # filter out bad results and join everything together into an array of shape (..., 3) - the endpoints
+            # of each finished ray.
+            processed_results = []
+            for r in results:
+                if type(r) is np.ndarray:
+                    processed_results.append(r)
+            traced_rays = np.concatenate(processed_results, axis=0)
+
+            if self.optical_system.goal is not None:
+                computed_goal = self.optical_system.goal.get_goal(traced_rays)
+                self.server.send_data(tcp.SERVER_SEND_GOAL, pickle.dumps((traced_rays, computed_goal)))
+            else:
+                self.nonfatal_error("Remote system has no goal defined, so it cannot be displayed")
+        except Exception:
+            self.nonfatal_error("Obtaining Remote Goal")
 
 
 class Worker:

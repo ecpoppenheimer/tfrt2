@@ -46,6 +46,8 @@ SERVER_FLATTENER =   b"server flattener"
 CLIENT_SINGLE_STEP = b"client one step "
 SERVER_SINGLE_STEP = b"server one step "
 SERVER_ST_UPDATE =   b"server st update"
+CLIENT_GET_GOAL =    b"client get goal "
+SERVER_SEND_GOAL =   b"server goal     "
 
 
 class InvalidHeaderError(ValueError):
@@ -117,7 +119,10 @@ class TcpDataPacker:
         self._receive_validator = receive_validator
         self._required_bytes = 0
         self._chunk_in_progress = False
-        self._socket.readyRead.connect(self._read_some)
+        try:
+            self._socket.readyRead.connect(self._read_some)
+        except AttributeError as e:
+            raise RuntimeError("Bad Socket, unable to connect") from e
         self.validated = False
         self.verbose = verbose
 

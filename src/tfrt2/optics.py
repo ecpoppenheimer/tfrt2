@@ -31,7 +31,7 @@ class TriangleOptic:
 
     def __init__(
         self, driver, system_path, input_settings, mesh=None, mat_in=None, mat_out=None, hold_load=False,
-        flip_norm=False, suppress_ui=False
+        suppress_ui=False, flip_norm=False, active=True
     ):
         """
         Basic 3D Triangulated optical surface.
@@ -90,17 +90,31 @@ class TriangleOptic:
         self.mat_in = mat_in or 0
         self.mat_out = mat_out or 0
         self.vertices = None
-        self.faces = None
+        self._raw_faces = None
         self.driver = driver
+        self.base_mesh = None
+        self.tiled_base_mesh = None
         self.face_vertices = None
         self.norm = None
-        self.flip_norm = flip_norm
         self.p = None
         self.u = None
         self.v = None
         self.zero_points = None
         self.drawer = None
-        self.settings.establish_defaults(frozen=False)
+        self.settings.establish_defaults(
+            frozen=False,
+            flip_norm=flip_norm,
+            active=active,
+            translation=np.array((0.0, 0.0, 0.0), dtype=np.float64),
+            rotation=TriangleOptic.BASE_ORIENTATION.copy(),
+            tileable=False,
+            tile_1_low_count=0,
+            tile_1_high_count=0,
+            tile_1_vector=np.array((1.0, 0.0, 0.0)),
+            tile_2_low_count=0,
+            tile_2_high_count=0,
+            tile_2_vector=np.array((0.0, 1.0, 0.0))
+        )
         self.translation = None
         self.rotation = None
         self.tcp_ack_remeshed = False
@@ -127,29 +141,33 @@ class TriangleOptic:
 
     def as_mesh(self):
         try:
-            return pv.PolyData(self.vertices.numpy(), mt.pack_faces(self.faces.numpy()))
+            return pv.PolyData(self.vertices.numpy(), mt.pack_faces(self.faces))
         except Exception:
             return pv.PolyData(np.array(self.vertices), mt.pack_faces(np.array(self.faces)))
 
     def from_mesh(self, mesh):
-        self.zero_points = mesh.points
-        self.faces = tf.constant(self.try_flip_norm(mt.unpack_faces(mesh.faces)), dtype=tf.int32)
+        self.base_mesh = mesh
+        vertices, faces = mesh.points, mt.unpack_faces(mesh.faces)
+        tiling_params = self._compute_tiling(vertices, faces)
+        self.zero_points = self._perform_vertex_tiling(vertices, tiling_params)
+        self._raw_faces = self._perform_face_tiling(faces, tiling_params)
+        self.tiled_base_mesh = pv.PolyData(self.zero_points, mt.pack_faces(self._raw_faces))
         self.update()
-
-    def try_flip_norm(self, faces):
-        if self.flip_norm:
-            return np.take(faces, [2, 1, 0], axis=1)
-        else:
-            return faces
 
     def gather_faces(self):
         self.face_vertices = mt.points_from_faces(self.vertices, self.faces)
 
     def compute_norm(self):
-        self.p, second_points, third_points = self.face_vertices
-        self.u = second_points - self.p
-        self.v = third_points - self.p
-        self.norm = tf.linalg.normalize(tf.linalg.cross(self.u, self.v), axis=1)[0]
+        if self.settings.active:
+            self.p, second_points, third_points = self.face_vertices
+            self.u = second_points - self.p
+            self.v = third_points - self.p
+            self.norm = tf.linalg.normalize(tf.linalg.cross(self.u, self.v), axis=1)[0]
+        else:
+            self.p = tf.zeros((0, 3), dtype=tf.float64)
+            self.u = tf.zeros((0, 3), dtype=tf.float64)
+            self.v = tf.zeros((0, 3), dtype=tf.float64)
+            self.norm = tf.ones((0, 3), dtype=tf.float64)
 
     def update(self):
         if self.translation is not None and self.rotation is not None:
@@ -160,8 +178,76 @@ class TriangleOptic:
 
         # Separate the vertices out by face
         self.gather_faces()
-        # Compute the norm
         self.compute_norm()
+
+    def update_tiling(self):
+        """
+        Expand vertices and faces to tile the optic.
+        """
+        self.from_mesh(self.base_mesh)
+        self.update_and_redraw()
+
+    def _compute_tiling(self, vertices, faces):
+        """
+        Returns None if no tiling needs to happen.  Otherwise, returns a tuple of:
+        (total_repeats, base_vertex_count, base_face_count, combined_offsets)
+        These are the parameters that need to be fed to the tiling sub functions to tile various optic components.
+        """
+        if self.settings.tileable:
+            tile_1_offsets = \
+                np.arange(self.settings.tile_1_low_count, self.settings.tile_1_high_count+1)
+            tile_2_offsets = \
+                np.arange(self.settings.tile_2_low_count, self.settings.tile_2_high_count+1)
+            total_repeats = len(tile_1_offsets) * len(tile_2_offsets)
+            if total_repeats == 1:
+                return None
+            base_vertex_count = len(vertices)
+            base_face_count = len(faces)
+
+            tile_1_offsets, tile_2_offsets = np.meshgrid(tile_1_offsets, tile_2_offsets)
+            tile_1_offsets = np.expand_dims(tile_1_offsets.flatten(), axis=1)
+            tile_2_offsets = np.expand_dims(tile_2_offsets.flatten(), axis=1)
+            combined_offsets = tile_1_offsets * np.expand_dims(self.settings.tile_1_vector, axis=0) + \
+                tile_2_offsets * np.expand_dims(self.settings.tile_2_vector, axis=0)
+
+            return total_repeats, base_vertex_count, base_face_count, combined_offsets
+        else:
+            return None
+
+    @staticmethod
+    def _perform_vertex_tiling(vertices, tiling_params):
+        """
+        Tile a set of vertices with the tiling parameters.  Feed the return from _compute_tiling directly
+        to this function.  If there is no tiling to perform, this will return vertices as is, so this function can be
+        used inline without any case checking.
+        """
+        if tiling_params is None:
+            return vertices
+        else:
+            total_repeats, base_vertex_count, base_face_count, combined_offsets = tiling_params
+            # For vertices, need to tile the vertices to the repeats, and add the offsets (which are the repeats)
+            # to the vertices.
+            return np.tile(vertices, (total_repeats, 1)) + \
+                np.repeat(combined_offsets, base_vertex_count, axis=0)
+
+    @staticmethod
+    def _perform_face_tiling(faces, tiling_params):
+        """
+        Tile a set of faces with the tiling parameters in parameters.  Feed the return from _compute_tiling directly
+        to this function.  If there is no tiling to perform, this will return faces as is, so this function can be
+        used inline without any case checking.
+        """
+        if tiling_params is None:
+            return faces
+        else:
+            total_repeats, base_vertex_count, base_face_count, combined_offsets = tiling_params
+            # For faces, need to tile raw_faces for the total repeats, and add an offset derived from the
+            # number of base vertices.
+            # The second line creates (0, 0, 0, 0, ..., 1, 1, 1, 1, ..., 2, 2, 2, 2, ..., ...) with total count equal
+            # to base_face_count*total_repeats.  Then multiplies by the vertex count, and finally gets an extra
+            # dimension added to match the 2D shape of the faces.
+            return np.tile(faces, (total_repeats, 1)) +\
+                np.expand_dims(np.repeat(np.arange(total_repeats), base_face_count) * base_vertex_count, axis=1)
 
     def redraw(self):
         """
@@ -169,6 +255,10 @@ class TriangleOptic:
         """
         if self.drawer is not None:
             self.drawer.draw()
+
+    def update_and_redraw(self):
+        self.update()
+        self.redraw()
 
     def update_rotation(self, do_update=True):
         try:
@@ -189,6 +279,13 @@ class TriangleOptic:
                 self.redraw()
         except KeyError:
             pass
+
+    @property
+    def faces(self):
+        if self.settings.flip_norm:
+            return np.take(self._raw_faces, [2, 1, 0], axis=1)
+        else:
+            return self._raw_faces
 
 
 class ParametricTriangleOptic(TriangleOptic):
@@ -332,7 +429,6 @@ class ParametricTriangleOptic(TriangleOptic):
         self.zero_points = None
         self.vectors = None
         self.fixed_points = None
-        self.fixed_point_zeros = None
         self.gather_vertices = None
         self.gather_params = None
         self.initials = None
@@ -387,7 +483,7 @@ class ParametricTriangleOptic(TriangleOptic):
         account the fixed / driven vertices), or it must be shaped like the vertices (or at least, have one element
         per vertex).
         """
-        self.base_mesh = mesh
+        self.base_mesh = mesh.copy()
         all_indices = np.arange(mesh.points.shape[0])
         available_indices = all_indices.copy()
         drivens_driver = {}
@@ -423,12 +519,12 @@ class ParametricTriangleOptic(TriangleOptic):
         else:
             driver_indices = available_indices
 
-        # At this point we should be guarenteed to have three sets of mutually exclusive indices, that all index into
+        # At this point we should be guaranteed to have three sets of mutually exclusive indices, that all index into
         # mesh.points:
         # fixed_indices are all indices of vertices that will not be moved,
         # driver_indices are indices of vertices that will get an attached parameter
         # drivens_driver is a dict whose keys are indices of driven vertices and whose value is the index of the
-        # driver to controll this driven vertex.
+        # driver to control this driven vertex.
         self.driver_indices = np.array(driver_indices)
         self.driven_indices = np.array(list(driven_indices))
         self.fixed_indices = np.array(fixed_indices)
@@ -445,7 +541,6 @@ class ParametricTriangleOptic(TriangleOptic):
         movable_count = len(self.movable_indices)
         param_count = len(driver_indices)
         self.fixed_points = mesh.points[fixed_indices]
-        self.fixed_point_zeros = self.fixed_points.copy()
         self.zero_points = mesh.points[self.movable_indices]
 
         if self.any_driven:
@@ -477,23 +572,53 @@ class ParametricTriangleOptic(TriangleOptic):
             }
 
             # Now need to construct the gather_params, a set of indices that can be used to gather from parameters to
-            # zero points.
+            # zero points. (points each zero point to its parameter)
             self.gather_params = tf.constant(
                 [gather_drivens_driver[key] for key in range(movable_count)],
                 dtype=tf.int32
             )
 
-        # Convert movable_to_p to an array, for speed
+        # Tile.
+        unpacked_faces = mt.unpack_faces(mesh.faces)
+        tiling_params = self._compute_tiling(mesh.points, unpacked_faces)
+        if tiling_params is not None:
+            # indices sets need a particular tiling function, as they need to get tiled and then offset by the
+            # total number of vertices.  Uses full mesh tiling params.
+            # driver indices is special.  We don't want to add any driver indices - we want these to be driven.
+            # So create a set of the tiled driver indices, remove the real driver indices, and add them to the driven
+            # indices.
+            tiled_driver_indices = set(self._perform_index_tiling(self.driver_indices, tiling_params))
+            driven_indices = set(self._perform_index_tiling(self.driven_indices, tiling_params))
+            self.driven_indices = np.array((tiled_driver_indices - set(self.driver_indices)) | driven_indices)
+            self.fixed_indices = self._perform_index_tiling(self.fixed_indices, tiling_params)
+            self.movable_indices = self._perform_index_tiling(self.movable_indices, tiling_params)
+            # fixed_points and zero_points have to be tiled like vertices, and unfortunately need their own tiling
+            # params.  Can feed an empty tuple for faces, since it won't be needed for either tile.
+            self.fixed_points = self._perform_vertex_tiling(
+                self.fixed_points,
+                self._compute_tiling(self.fixed_points, ())
+            )
+            self.zero_points = self._perform_vertex_tiling(
+                self.zero_points,
+                self._compute_tiling(self.zero_points, ())
+            )
+            # gather_params simply has to be copied / tiled
+            self.gather_params = tf.tile(self.gather_params, (tiling_params[0],))
+        # raw_faces has to be tiled using the tiling params from the full mesh
+        self._raw_faces = self._perform_face_tiling(unpacked_faces, tiling_params)
+        self.tiled_base_mesh = pv.PolyData(
+            np.concatenate((self.fixed_points, self.zero_points), axis=0),
+            mt.pack_faces(self._raw_faces)
+        )
 
         if self.any_fixed:
             # Now need to construct gather_vertices, a set of indices that can be used to gather from
             # the concatenation of fixed_points and zero_points (in that order) to the full vertices.
-            gather_vertices = np.argsort(np.concatenate((fixed_indices, self.movable_indices)))
+            gather_vertices = np.argsort(np.concatenate((self.fixed_indices, self.movable_indices)))
             self.gather_vertices = tf.constant(gather_vertices, dtype=tf.int32)
 
         # Make the final components of the surface.
         self.parameters = tf.Variable(initial_value=tf.zeros((param_count, 1), dtype=tf.float64))
-        self.faces = tf.convert_to_tensor(self.try_flip_norm(mt.unpack_faces(mesh.faces)), dtype=tf.int32)
         self.vectors = self.vector_generator(self.zero_points)
 
         # Need to construct v_to_p, which maps every vertex to a parameter, or -1 if there is no parameter.
@@ -542,6 +667,28 @@ class ParametricTriangleOptic(TriangleOptic):
         self.try_mesh_tools()
         self.smoother = self.get_smoother(self.settings.smooth_stddev)
 
+    @staticmethod
+    def _perform_index_tiling(indices, tiling_params):
+        """
+        Tile a set of indices with the tiling parameters.  Feed the return from _compute_tiling directly
+        to this function.  If there is no tiling to perform, this will return indices as is, so this function can be
+        used inline without any case checking.
+        """
+        if tiling_params is None:
+            return indices
+        else:
+            total_repeats, base_vertex_count, base_face_count, combined_offsets = tiling_params
+            # For vertices, need to tile the vertices to the repeats, and add the offsets (which are the repeats)
+            # to the vertices.
+            return np.tile(indices, total_repeats) + \
+                np.repeat(np.arange(total_repeats), len(indices)) * base_vertex_count
+
+    def update_tiling(self):
+        self.from_mesh(self.base_mesh, self.parameters)
+        self.update_and_redraw()
+
+        #self.v_to_p = np.tile(self.v_to_p, total_repeats)
+
     def try_mesh_tools(self):
         vertices = self.get_vertices_from_params(tf.zeros_like(self.parameters))
         if self.enable_vum:
@@ -549,7 +696,7 @@ class ParametricTriangleOptic(TriangleOptic):
                 self.settings.vum_origin,
                 tuple(each.numpy() for each in self.face_vertices),
                 self.vertices.numpy(),
-                self.faces.numpy()
+                self.faces
             ), dtype=tf.bool)
         if self.enable_accumulator:
             active_vertices = tf.gather(vertices, self.driver_indices, axis=0)
@@ -575,7 +722,7 @@ class ParametricTriangleOptic(TriangleOptic):
             self.gather_faces()
             # Try applying the vum on the separated vertices
             self.face_vertices = self.try_vum(*self.face_vertices)
-            # Compute the norm
+
             self.compute_norm()
 
     def get_vertices_from_params(self, params):
@@ -754,10 +901,11 @@ class ReparameterizableTriangleOpticBase(ParametricTriangleOptic):
             All remaining kwargs are passed to ParametricTriangleOptic.
         """
         try:
-            self.c1, self.c2, self.c3, plane_n = self.plane_lookup[plane]
+            self.c1, self.c2, self.c3, self.plane_n = self.plane_lookup[plane]
+            self.base_plane = plane
         except KeyError as e:
             raise ValueError("ReparameterizablePlanarOptic: plane must be 'xy', 'yz', or 'xz'.") from e
-        vector_generator = FromVectorVG(plane_n)
+        vector_generator = FromVectorVG(self.plane_n)
 
         if type(mesh_generator) is str:
             if mesh_generator == "circle":
@@ -807,18 +955,51 @@ class ReparameterizableTriangleOpticBase(ParametricTriangleOptic):
             "Cannot use ReparameterizableTriangleOpticBase - it is a base class.  Used a derived class instead."
         )
 
+    def shape_to_p(self, new_zero_mesh):
+        raise NotImplementedError(
+            "Cannot use ReparameterizableTriangleOpticBase - it is a base class.  Used a derived class instead."
+        )
+
 
 class ReparameterizablePlanarOptic(ReparameterizableTriangleOpticBase):
+    def shape_to_p(self):
+        """
+        Converts a shaped zero point mesh (with extent in the direction of the vectors) to a flat zero point mesh
+        with the parameters equal to initial flattened coordinate.  This will not change the shape of the mesh, but
+        will make it work better with constraints.
+        """
+        new_initials = self.vertices[:, self.c3]
+        new_zero_mesh = self.base_mesh.copy()
+
+        # Only want to flatten the non-fixed vertices
+        if hasattr(self, "filter_fixed"):
+            new_zero_mesh.points[:, self.c3][np.logical_not(self.filter_fixed(self.vertices))] = 0
+        else:
+            new_zero_mesh.points[:, self.c3] = 0
+
+        # Rebuild the optic.
+        self.from_mesh(new_zero_mesh, new_initials)
+
     def remesh_core(self, new_zero_mesh):
         # Project and extract the shape of the surface, and interpolate.
         x, y, z = (self.vertices[:, c].numpy() for c in (self.c1, self.c2, self.c3))
         interpolation = scipy.interpolate.LinearNDInterpolator((x, y), z, 0)
         new_zero_x, new_zero_y = new_zero_mesh.points[:, self.c1], new_zero_mesh.points[:, self.c2]
-
         new_initials = interpolation((new_zero_x, new_zero_y))
-        new_initials = tf.convert_to_tensor(new_initials, dtype=tf.float64)
+
+        # New_zero_x, new_zero_y, and new_initials hold what should be the new shape of the mesh.  But new_initials
+        # will only be used for driving vertices - the fixed ones will be missed.  Will need to push the fixed points
+        # z values (new_initials) into new_zero_mesh now to preserve them.
+        if hasattr(self, "filter_fixed"):
+            fixed_points = self.filter_fixed(new_zero_mesh.points)
+            new_zero_mesh.points[:, self.c3] = np.where(
+                fixed_points,
+                new_initials,
+                0.0
+            )
 
         # Rebuild the optic.
+        new_initials = tf.convert_to_tensor(new_initials, dtype=tf.float64)
         self.from_mesh(new_zero_mesh, new_initials)
 
 
@@ -1005,11 +1186,6 @@ class OpticController(qtw.QWidget):
         self._input_valid = "mesh_input_path" in settings_keys
         self._output_valid = "mesh_output_path" in settings_keys
 
-        self.component.settings.establish_defaults(
-            translation=np.array((0.0, 0.0, 0.0), dtype=np.float64),
-            rotation=TriangleOptic.BASE_ORIENTATION.copy()
-        )
-
         # build the UI elements
         main_layout = qtw.QGridLayout()
         main_layout.setContentsMargins(11, 11, 0, 11)
@@ -1045,8 +1221,13 @@ class OpticController(qtw.QWidget):
             save_all_button = qtw.QPushButton("Save Everything")
             save_all_button.clicked.connect(self.save_all)
             main_layout.addWidget(save_all_button, ui_row, 0, 1, 3)
+        ui_row += 1
 
-        main_layout.addWidget(cw.SettingsCheckBox(self.component.settings, "frozen", "Freeze Optic"), ui_row, 6, 1, 3)
+        main_layout.addWidget(cw.SettingsCheckBox(self.component.settings, "active", "Active"), ui_row, 0, 1, 3)
+        main_layout.addWidget(cw.SettingsCheckBox(self.component.settings, "frozen", "Freeze Optic"), ui_row, 4, 1, 3)
+        main_layout.addWidget(cw.SettingsCheckBox(
+            self.component.settings, "flip_norm", "Flip Norm", self.component.update_and_redraw
+        ), ui_row, 8, 1, 3)
         ui_row += 1
 
         main_layout.addWidget(
@@ -1064,15 +1245,44 @@ class OpticController(qtw.QWidget):
         )
         ui_row += 1
 
-        # !!!!!!!!!!!!! this has to be moved to a generally re-parametrizable optic.
-        """if self._params_valid:
-            main_layout.addWidget(SettingsEntryBox(
-                self.component.settings,
-                "parameter_count",
-                int,
-                qtg.QIntValidator(5, 1000),
-                [self.component.remesh, self.component.update]
-            ))"""
+        tiling_layout = qtw.QGridLayout()
+        tiling_layout.setContentsMargins(0, 0, 0, 0)
+        self.tiling_widget = qtw.QWidget()
+        self.tiling_widget.setLayout(tiling_layout)
+        main_layout.addWidget(cw.SettingsCheckBox(
+            self.component.settings, "tileable", "Tile", self.toggle_tiling_visibility
+        ))
+        ui_row += 1
+        main_layout.addWidget(self.tiling_widget, ui_row, 0, 1, 12)
+        self.toggle_tiling_visibility()
+
+        tiling_layout.addWidget(cw.SettingsEntryBox(
+            self.component.settings, "tile_1_low_count", int, qtg.QIntValidator(-500, 500),
+            self.component.update_tiling, "Tiling 1 Start Count"
+        ), 0, 0, 1, 1)
+        tiling_layout.addWidget(cw.SettingsEntryBox(
+            self.component.settings, "tile_1_high_count", int, qtg.QIntValidator(-500, 500),
+            self.component.update_tiling, "End"
+        ), 0, 1, 1, 1)
+        tiling_layout.addWidget(cw.SettingsVectorBox(
+            self.component.settings, "Tiling 1 Vector", "tile_1_vector", self.component.update_tiling
+        ), 1, 0, 1, 2)
+
+        tiling_layout.addWidget(cw.SettingsEntryBox(
+            self.component.settings, "tile_2_low_count", int, qtg.QIntValidator(-500, 500),
+            self.component.update_tiling, "Tiling 2 Start Count"
+        ), 2, 0, 1, 1)
+        tiling_layout.addWidget(cw.SettingsEntryBox(
+            self.component.settings, "tile_2_high_count", int, qtg.QIntValidator(-500, 500),
+            self.component.update_tiling, "End"
+        ), 2, 1, 1, 1)
+        tiling_layout.addWidget(cw.SettingsVectorBox(
+            self.component.settings, "Tiling 2 Vector", "tile_2_vector", self.component.update_tiling
+        ), 3, 0, 1, 2)
+
+    def update_component(self):
+        self.component.update()
+        self.component.redraw()
 
     def save_mesh(self):
         if self._output_valid:
@@ -1132,6 +1342,12 @@ class OpticController(qtw.QWidget):
         # These functions already check whether their operation is valid, and silently do nothing if it isn't
         self.save_mesh()
         self.save_parameters()
+
+    def toggle_tiling_visibility(self):
+        if self.component.settings.tileable:
+            self.tiling_widget.show()
+        else:
+            self.tiling_widget.hide()
 
 
 class MeshTricksController(qtw.QWidget):
@@ -1249,7 +1465,7 @@ class MeshTricksController(qtw.QWidget):
             directions = []
             vertices = self.component.vertices.numpy()
 
-            for face, vu in zip(self.component.faces.numpy(), self.component.vum.numpy()):
+            for face, vu in zip(self.component.faces, self.component.vum):
                 for v, on in zip(face, vu):
                     if on:
                         face_center = np.sum(vertices[face], axis=0) / 3
@@ -1374,13 +1590,10 @@ class SpacingConstraint(qtw.QWidget):
     def __init__(self, settings, distance_constraint, target=None, mode="min"):
         super().__init__()
         self.settings = settings
-        self.target  =target
-        if mode == "min":
-            self._reduce = tf.reduce_min
-        elif mode == "max":
-            self._reduce = tf.reduce_max
-        else:
-            raise ValueError(f"FixedMinDistanceConstraint: mode must be 'min' or 'max'.")
+        self.target = target
+        if mode not in {"min", "max", "fixed_min", "fixed_max"}:
+            raise ValueError(f"FixedMinDistanceConstraint: mode must be 'min' or 'max'. 'fixed_min' or 'fixed_max'.")
+        self._mode = mode
         self.settings.establish_defaults(distance_constraint=distance_constraint)
         layout = qtw.QHBoxLayout()
         layout.setContentsMargins(11, 11, 0, 11)
@@ -1394,9 +1607,179 @@ class SpacingConstraint(qtw.QWidget):
             target = tf.zeros_like(component.parameters)
         else:
             target = self.target.parameters
-        diff = self._reduce(component.parameters - target - self.settings.distance_constraint)
+        if self._mode == "min":
+            diff = tf.where(
+                component.parameters - target < self.settings.distance_constraint,
+                component.parameters - target - self.settings.distance_constraint,
+                tf.zeros_like(target)
+            )
+        elif self._mode == "max":
+            diff = tf.where(
+                component.parameters - target > self.settings.distance_constraint,
+                component.parameters - target - self.settings.distance_constraint,
+                tf.zeros_like(target)
+            )
+        elif self._mode == "fixed_min":
+            diff = tf.reduce_min(component.parameters - target - self.settings.distance_constraint)
+        else: # self._mode == "fixed_max
+            diff = tf.reduce_max(component.parameters - target - self.settings.distance_constraint)
+
         diff = tf.broadcast_to(diff, component.parameters.shape)
         component.param_assign_sub(diff)
+
+
+class StripConstraint(qtw.QWidget):
+    _c_LUT = {"x": 0, "y": 1, "z": 2}
+
+    def __init__(self, settings, strip_pos=0.0, strip_width=1.0, strip_height=.5, strip_plane="x-z", min_mode=True):
+        super().__init__()
+        self.settings = settings
+        self._cw = 0
+        self._ch = 1
+        self.settings.establish_defaults(
+            strip_pos=strip_pos, strip_width=strip_width, strip_height=strip_height, strip_mode=min_mode,
+            strip_plane=strip_plane
+        )
+        layout = qtw.QGridLayout()
+        layout.setContentsMargins(11, 11, 0, 11)
+        layout.addWidget(qtw.QLabel("Strip Constraint"), 0, 0, 1, 2)
+        layout.addWidget(cw.SettingsEntryBox(
+            self.settings, "strip_pos", float, label="Strip Position",
+            validator=qtg.QDoubleValidator(-1e3, 1e3, 6)
+        ), 1, 0, 1, 1)
+        layout.addWidget(cw.SettingsEntryBox(
+            self.settings, "strip_width", float, label="Strip Width",
+            validator=qtg.QDoubleValidator(1e-3, 1e3, 6)
+        ), 1, 1, 1, 1)
+        layout.addWidget(cw.SettingsEntryBox(
+            self.settings, "strip_height", float, label="Strip Height",
+            validator=qtg.QDoubleValidator(1e-3, 1e3, 6)
+        ), 2, 0, 1, 1)
+        layout.addWidget(cw.SettingsComboBox(
+            self.settings, "Width-Height", "strip_plane", ("x-y", "x-z", "y-x", "y-z", "z-x", "z-y"),
+            callback=self._update_plane
+        ), 2, 1, 1, 1)
+        layout.addWidget(cw.SettingsCheckBox(self.settings, "strip_mode", "Minimum"), 3, 0, 1, 1)
+        self.setLayout(layout)
+
+    def _update_plane(self):
+        self._cw = self._c_LUT[self.settings.strip_plane[0]]
+        self._ch = self._c_LUT[self.settings.strip_plane[2]]
+
+    def __call__(self, component):
+        # Have to do this because vertices gets set after constraints are processed, so have to look forward to
+        # get the vertices.
+        vertices = component.get_vertices_from_params(component.parameters)
+        x = vertices[:, self._cw]
+        y = vertices[:, self._ch]
+        in_strip = tf.abs(x - component.settings.strip_pos) < component.settings.strip_width / 2.0
+        if component.settings.strip_mode:
+            # minimum mode
+            delta = component.settings.strip_height - y
+            delta = tf.where(tf.logical_and(delta > 0.0, in_strip), delta, 0.0)
+            extrema = tf.reduce_max
+        else:
+            # maximum mode
+            delta = component.settings.strip_height - y
+            delta = tf.where(tf.logical_and(delta < 0.0, in_strip), delta, 0.0)
+            extrema = tf.reduce_min
+
+        # delta is where each vertex needs to change, but we need to convert this to parameters, which can be done
+        # with v_to_p.
+        vertex_param, parameter_index = tf.meshgrid(component.v_to_p, tf.range(component.parameters.shape[0]))
+        mask = vertex_param == parameter_index
+
+        delta_p = tf.zeros(component.parameters.shape, dtype=tf.float64)
+        delta, delta_p = tf.meshgrid(delta, delta_p)
+
+        delta_p = tf.where(mask, delta, delta_p)
+        delta_p = extrema(delta_p, axis=1, keepdims=True)
+
+        component.param_assign_add(delta_p)
+
+
+class SpotConstraint(qtw.QWidget):
+    def __init__(self, settings, center=(0.0, 0.0), height=0.5, radius=.1, plane="xz", min_mode=True):
+        super().__init__()
+        self.settings = settings
+        self._c1 = 0
+        self._c2 = 2
+        self._ch = 1
+        self.settings.establish_defaults(
+            spot_center_1=center[0], spot_center_2=center[1], spot_height=height, spot_radius=radius, spot_plane=plane,
+            spot_mode=min_mode,
+        )
+        layout = qtw.QGridLayout()
+        layout.setContentsMargins(11, 11, 0, 11)
+        layout.addWidget(qtw.QLabel("Spot Constraint"), 0, 0, 1, 2)
+        layout.addWidget(cw.SettingsEntryBox(
+            self.settings, "spot_center_1", float, label="Center C1",
+            validator=qtg.QDoubleValidator(-1e3, 1e3, 6)
+        ), 1, 0, 1, 1)
+        layout.addWidget(cw.SettingsEntryBox(
+            self.settings, "spot_center_2", float, label="Center C2",
+            validator=qtg.QDoubleValidator(1e-3, 1e3, 6)
+        ), 1, 1, 1, 1)
+        layout.addWidget(cw.SettingsEntryBox(
+            self.settings, "spot_height", float, label="Spot Height",
+            validator=qtg.QDoubleValidator(1e-3, 1e3, 6)
+        ), 2, 0, 1, 1)
+        layout.addWidget(cw.SettingsEntryBox(
+            self.settings, "spot_radius", float, label="Spot Radius",
+            validator=qtg.QDoubleValidator(1e-3, 1e3, 6)
+        ), 2, 1, 1, 1)
+        layout.addWidget(cw.SettingsComboBox(
+            self.settings, "Plane", "spot_plane", ("xy", "yz", "xz"),
+            callback=self._update_plane
+        ), 3, 0, 1, 1)
+        layout.addWidget(cw.SettingsCheckBox(self.settings, "spot_mode", "Minimum"), 3, 1, 1, 1)
+        self.setLayout(layout)
+
+    def _update_plane(self):
+        if self.settings.spot_plane == "xy":
+            self._c1 = 0
+            self._c2 = 1
+            self._ch = 2
+        elif self.settings.spot_plane == "yz":
+            self._c1 = 1
+            self._c2 = 2
+            self._ch = 0
+        else: #self.settings.spot_plane == "xz":
+            self._c1 = 0
+            self._c2 = 2
+            self._ch = 1
+
+    def __call__(self, component):
+        # Have to do this because vertices gets set after constraints are processed, so have to look forward to
+        # get the vertices.
+        vertices = component.get_vertices_from_params(component.parameters)
+        x = vertices[:, self._c1] - self.settings.spot_center_1
+        y = vertices[:, self._c2] - self.settings.spot_center_2
+        z = vertices[:, self._ch]
+        in_spot = x*x + y*y < self.settings.spot_radius*self.settings.spot_radius
+        if component.settings.strip_mode:
+            # minimum mode
+            delta = component.settings.spot_height - z
+            delta = tf.where(tf.logical_and(delta > 0.0, in_spot), delta, 0.0)
+            extrema = tf.reduce_max
+        else:
+            # maximum mode
+            delta = component.settings.spot_height - z
+            delta = tf.where(tf.logical_and(delta < 0.0, in_spot), delta, 0.0)
+            extrema = tf.reduce_min
+
+        # delta is where each vertex needs to change, but we need to convert this to parameters, which can be done
+        # with v_to_p.
+        vertex_param, parameter_index = tf.meshgrid(component.v_to_p, tf.range(component.parameters.shape[0]))
+        mask = vertex_param == parameter_index
+
+        delta_p = tf.zeros(component.parameters.shape, dtype=tf.float64)
+        delta, delta_p = tf.meshgrid(delta, delta_p)
+
+        delta_p = tf.where(mask, delta, delta_p)
+        delta_p = extrema(delta_p, axis=1, keepdims=True)
+
+        component.param_assign_add(delta_p)
 
 
 # ======================================================================================================================
@@ -1407,6 +1790,7 @@ class MeshGenerator(abc.ABC):
         self.optic = optic
         self.max_ui_cols = max_ui_cols
         self.remesh_button = qtw.QPushButton("Remesh")
+        self.extract_button = qtw.QPushButton("Extract Parameters")
 
     def get_ui_widget(self):
         widget = qtw.QWidget()
@@ -1415,8 +1799,10 @@ class MeshGenerator(abc.ABC):
         widget.setLayout(layout)
 
         ui_row = 0
-        layout.addWidget(self.remesh_button, ui_row, 0, 1, self.max_ui_cols)
+        layout.addWidget(self.remesh_button, ui_row, 0, 1, int(self.max_ui_cols/2))
         self.remesh_button.clicked.connect(self._remesh)
+        layout.addWidget(self.extract_button, ui_row, int(self.max_ui_cols / 2), 1, int(self.max_ui_cols/2))
+        self.extract_button.clicked.connect(self._extract_params)
         ui_row += 1
 
         self.make_ui_widget(layout, ui_row)
@@ -1439,14 +1825,17 @@ class MeshGenerator(abc.ABC):
         return NotImplementedError
 
     @abc.abstractmethod
-    def get_new_mesh(self):
+    def get_new_mesh(self, optic):
         """
         Generate (and return) a new pyvista mesh to use as the new zero points for the optic.
         """
         return NotImplementedError
 
     def _remesh(self):
-        self.optic.remesh(self.get_new_mesh())
+        self.optic.remesh(self.get_new_mesh(self.optic))
+
+    def _extract_params(self):
+        self.optic.shape_to_p()
 
 
 class CircleMeshGenerator(MeshGenerator):
@@ -1469,7 +1858,7 @@ class CircleMeshGenerator(MeshGenerator):
             qtg.QDoubleValidator(1e-6, 1e6, 8),
         ), ui_row, 6, 1, 6)
 
-    def get_new_mesh(self):
+    def get_new_mesh(self, optic):
         return mt.circular_mesh(
             self.optic.settings.remesh_radius,
             self.optic.settings.remesh_target_edge_size
@@ -1479,43 +1868,48 @@ class CircleMeshGenerator(MeshGenerator):
 class SquareMeshGenerator(MeshGenerator):
     def make_ui_widget(self, layout, ui_row):
         self.optic.settings.establish_defaults(
-            remesh_i_size=1.0,
-            remesh_j_size=1.0,
             remesh_i_resolution=5,
             remesh_j_resolution=5
         )
 
         layout.addWidget(cw.SettingsEntryBox(
             self.optic.settings,
-            "remesh_i_size",
-            float,
-            qtg.QDoubleValidator(1e-6, 1e6, 8),
-        ), ui_row, 0, 1, 6)
-        layout.addWidget(cw.SettingsEntryBox(
-            self.optic.settings,
-            "remesh_j_size",
-            float,
-            qtg.QDoubleValidator(1e-6, 1e6, 8),
-        ), ui_row, 6, 1, 6)
-        ui_row += 1
-
-        layout.addWidget(cw.SettingsEntryBox(
-            self.optic.settings,
             "remesh_i_resolution",
             int,
-            qtg.QIntValidator(2, int(1e6)),
+            qtg.QIntValidator(1, int(1e6)),
         ), ui_row, 0, 1, 6)
         layout.addWidget(cw.SettingsEntryBox(
             self.optic.settings,
             "remesh_j_resolution",
             int,
-            qtg.QIntValidator(2, int(1e6)),
+            qtg.QIntValidator(1, int(1e6)),
         ), ui_row, 6, 1, 6)
 
-    def get_new_mesh(self):
+    def get_new_mesh(self, optic):
+        # Get the size of the plane to create from the optic
+        points = np.array(optic.base_mesh.points)
+        x, y, z = points[:, 0], points[:, 1], points[:, 2]
+        x_min, x_max = np.amin(x), np.amax(x)
+        y_min, y_max = np.amin(y), np.amax(y)
+        z_min, z_max = np.amin(z), np.amax(z)
+        if optic.base_plane == "xy":
+            center = ((x_max + x_min)/2, (y_max + y_min)/2, 0)
+            i_size = x_max - x_min
+            j_size = y_max - y_min
+        elif optic.base_plane == "yz":
+            center = (0, (y_min + y_min) / 2, (z_max + z_min) / 2)
+            i_size = y_max - y_min
+            j_size = z_max - z_min
+        else:  # optic.base_plane == "xz"
+            center = ((x_max + x_min) / 2, 0, (z_max + z_min) / 2)
+            i_size = x_max - x_min
+            j_size = z_max - z_min
+
         return pv.Plane(
-            i_size=self.optic.settings.remesh_i_size,
-            j_size=self.optic.settings.remesh_j_size,
+            center=center,
+            direction=optic.plane_n,
+            i_size=i_size,
+            j_size=j_size,
             i_resolution=self.optic.settings.remesh_i_resolution,
             j_resolution=self.optic.settings.remesh_j_resolution
         ).triangulate()

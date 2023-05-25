@@ -97,6 +97,7 @@ an imaging problem can be formulated.  NOT TESTED.
 """
 
 import traceback
+import pickle
 
 import PyQt5.QtGui as qtg
 import PyQt5.QtWidgets as qtw
@@ -112,11 +113,17 @@ import tfrt2.component_widgets as cw
 import cumdistf.cdf as cdf
 
 
+# TODO Clipping has been basically disabled, because it seems like having a differently sized flattener and goal is
+# causing rays to bunch up along edges in wierd places, whenever lots of rays are hitting the clip target but
+# few are hitting the goal itself.
+
+
 class CPlaneGoal:
     """
     This goal always lives in one of the three coordinate planes: "xy", "yz", "xz".
     """
     cord = {'x': 0, 'X': 0, 'y': 1, 'Y': 1, 'z': 2, 'Z': 2}
+    pretty_cord = {0: 'X', 1: 'Y', 2: 'Z'}
 
     def __init__(
         self, driver, system_settings, mode, c1, c2, c3_offset, goal_cdf=None, auto_target=True,
@@ -164,7 +171,7 @@ class CPlaneGoal:
         self.settings.establish_defaults(
             c1=c1[0], c1_min=c1[1], c1_max=c1[2], c2=c2[0], c2_min=c2[1], c2_max=c2[2], visible=True,
             c3_offset=c3_offset, f_c1_res=64, f_c2_res=64, goal_color="#FFFFFF", c1_clip_min=c1[1], c1_clip_max=c1[2],
-            c2_clip_min=c2[1], c2_clip_max=c2[2]
+            c2_clip_min=c2[1], c2_clip_max=c2[2], clip_downlight=True
         )
         self.auto_target = auto_target
         self.auto_far_edge_distance = auto_far_edge_distance
@@ -241,6 +248,7 @@ class CPlaneGoal:
         # Slicing and projection constants, that will move the 3D finished ray points into the 2D plane of the goal
         self._slice_1 = 0
         self._slice_2 = 1
+        self._slice_3 = 2
         self._s1_clip_low = 0
         self._s1_clip_high = 1
         self._s2_clip_low = 0
@@ -359,6 +367,12 @@ class CPlaneGoal:
             ), self.ui_row, 2, 1, 4)
             self.ui_row += 1
 
+        # Check box to permit clipping downlight
+        main_layout.addWidget(cw.SettingsCheckBox(
+            self.settings, "clip_downlight", "Clip Down Light"
+        ), self.ui_row, 0, 1, 6)
+        self.ui_row += 1
+
         # Goal visualization tool
         main_layout.addWidget(qtw.QLabel("Goal visualization tool"), self.ui_row, 0, 1, 6)
         self.ui_row += 1
@@ -413,10 +427,11 @@ class CPlaneGoal:
         # Slicing and projection constants, that will move the 3D finished ray points into the 2D plane of the goal.
         self._slice_1 = tf.constant(a1, dtype=tf.int32)
         self._slice_2 = tf.constant(a2, dtype=tf.int32)
-        self._s1_clip_low = tf.constant(self.settings.c1_clip_min, dtype=tf.float64)
-        self._s1_clip_high = tf.constant(self.settings.c1_clip_max, dtype=tf.float64)
-        self._s2_clip_low = tf.constant(self.settings.c2_clip_min, dtype=tf.float64)
-        self._s2_clip_high = tf.constant(self.settings.c2_clip_max, dtype=tf.float64)
+        self._slice_3 = ({0, 1, 2} - {a1, a2}).pop()
+        self._s1_clip_low = tf.constant(self.settings.c1_min, dtype=tf.float64)
+        self._s1_clip_high = tf.constant(self.settings.c1_max, dtype=tf.float64)
+        self._s2_clip_low = tf.constant(self.settings.c2_min, dtype=tf.float64)
+        self._s2_clip_high = tf.constant(self.settings.c2_max, dtype=tf.float64)
 
         self._s3_offset = tf.constant(self.settings.c3_offset, dtype=tf.float64)
 
@@ -436,14 +451,16 @@ class CPlaneGoal:
         # Adjust the flattening icdf parameters, if it exists
         if self.flattening_icdf is not None:
             self.flattening_icdf.clear_density()
-            self.flattening_icdf.x_min = self.settings.c1_clip_min
-            self.flattening_icdf.x_max = self.settings.c1_clip_max
-            self.flattening_icdf.y_min = self.settings.c2_clip_min
-            self.flattening_icdf.y_max = self.settings.c2_clip_max
+            self.flattening_icdf.x_min = self.settings.c1_min
+            self.flattening_icdf.x_max = self.settings.c1_max
+            self.flattening_icdf.y_min = self.settings.c2_min
+            self.flattening_icdf.y_max = self.settings.c2_max
             if self.flatten_density is not None:
                 self.flattening_icdf.set_resolution(*self.flatten_density.shape)
                 self.flattening_icdf.compute(self.flatten_density, "inverse")
                 self.flatten_ready = True
+            else:
+                self.flatten_ready = False
 
         # Rescale the goal_cdf
         if self.goal_cdf is not None:
@@ -459,15 +476,18 @@ class CPlaneGoal:
         self.try_draw_test_goal_cdf(init)
         self.try_update_target(init)
 
+        try:
+            # Try updating the labels on the driver's remote pane.  This will fail if the driver is a server, in which
+            # case do nothing
+            self.driver.remote_pane.update_labels(self.pretty_cord[a1], self.pretty_cord[a2])
+        except Exception as e:
+            pass
+
     def try_redraw_goal(self, init=False):
         if init:
             return
         if not self._drawable or self.driver.optical_system is None:
-            try:
-                self._goal_drawer.lines = None
-                self._goal_drawer.draw()
-            except Exception:
-                pass
+            self.clear_goal()
             return
 
         try:
@@ -516,15 +536,31 @@ class CPlaneGoal:
         """
         Project and clip 3D rays into 2D in the plane of the goal.
         """
-        # We don't need the full rays to perform this operation - just the end points.  So lets check if that
-        # is what was fed.  If so, we don't want an offset.  Otherwise a full rayset was entered, which has
-        # at least 7 elements, so we need an offset of 3 from the start to extract the end points.
+        # Rays may be either a ray set, which has starting points and angles, and possibly other data we do not need,
+        # or rays could simply be a rank-2 array of three dimensional points.  (shape = (:, 3) )
         try:
             rays = rays.s + rays.hat
         except AttributeError:
-            rays = rays
+            pass
         x = np.clip(rays[:, self._slice_1], self._s1_clip_low, self._s1_clip_high)
         y = np.clip(rays[:, self._slice_2], self._s2_clip_low, self._s2_clip_high)
+
+        # Detect which rays are going down, and move them to the limits, to encourage them to stop going down.
+        if self.settings.clip_downlight:
+            is_down = np.array(rays)[:, self._slice_3] < 0.0
+            x_is_bigger = np.abs(x) >= np.abs(y)
+            y_is_bigger = np.logical_not(x_is_bigger)
+            x = np.where(
+                np.logical_and(is_down, x_is_bigger),
+                np.where(x < 0, self._s1_clip_low, self._s1_clip_high),
+                x
+            )
+            y = np.where(
+                np.logical_and(is_down, y_is_bigger),
+                np.where(y < 0, self._s2_clip_low, self._s2_clip_high),
+                y
+            )
+
         return np.stack((x, y), axis=1)
 
     def shift_to_goal_region(self, points):
@@ -561,14 +597,29 @@ class CPlaneGoal:
 
     def feed_flatten(self, points):
         if self.flattening_icdf is not None:
-            proj = self.project(points)
+            points = self.project(points)
             self.flattening_icdf.clear_density()
             self.flattening_icdf.set_resolution(self.settings.f_c1_res, self.settings.f_c2_res)
-            density = self.flattening_icdf.histogram_points(proj)
+            density = self.flattening_icdf.histogram_points(points)
             self.flattening_icdf.accumulate_density(density)
-            self.flattening_icdf.compute(direction="inverse")
+            self.flattening_icdf.compute(direction="inverse", epsilon=1.0)
+            self.flatten_density = density
             self.flatten_ready = True
             return density
+        else:
+            # Can just ignore the data.  This is a valid thing that can happen, because I do not want the tracing
+            # engine to have to decide whether or not to feed this data - it will just always feed it whether or not
+            # it is needed.
+            return None
+
+    def feed_flatten_density(self, density):
+        if self.flattening_icdf is not None:
+            self.flattening_icdf.clear_density()
+            self.flattening_icdf.set_resolution(self.settings.f_c1_res, self.settings.f_c2_res)
+            self.flattening_icdf.accumulate_density(density)
+            self.flattening_icdf.compute(direction="inverse", epsilon=1.0)
+            self.flatten_density = density
+            self.flatten_ready = True
         else:
             # Can just ignore the data.  This is a valid thing that can happen, because I do not want the tracing
             # engine to have to decide whether or not to feed this data - it will just always feed it whether or not
@@ -724,11 +775,33 @@ class CPlaneGoal:
             self.driver.optical_system.parts["auto_target"] = target
             self.driver.optical_system.targets.append(target)
 
-    def get_goal(self, ray_ends, extra):
+    def get_goal(self, ray_ends, _=None):
         if self.mode == "None":
             raise RuntimeError("Goal: Cannot call make_goal / use with an optimizer when in mode 'none'.")
         else:
             return self.expand(self.goal(self.flatten(self.project(ray_ends))))
+
+    def clear_goal(self):
+        try:
+            self._goal_drawer.lines = None
+            self._goal_drawer.draw()
+        except Exception:
+            pass
+
+    def draw_remote_goal(self, data):
+        if not self._drawable or self.driver.optical_system is None:
+            self.clear_goal()
+
+        try:
+            self._goal_drawer.lines = pickle.loads(data)
+            self._goal_drawer.draw()
+        except Exception:
+            self._goal_drawer.lines = None
+            self._goal_drawer.draw()
+            print(
+                f"CPlaneGoal: Got exception while trying to draw the goal..."
+            )
+            print(traceback.format_exc())
 
 
 class LineDrawer:
