@@ -120,10 +120,10 @@ def cosine_vum(origin, points, vertices, faces):
 
 def cosine_acum(origin, vertices):
     size = len(vertices)
-    accumulator = np.zeros((size, size), dtype=np.bool)
+    accumulator = np.zeros((size, size), dtype=bool)
     for i in range(size):
         accumulator[:, i] = np_projection(origin - vertices[i], vertices - vertices[i]) < -.85
-    accumulator = np.logical_or(accumulator, np.eye(size, dtype=np.bool))
+    accumulator = np.logical_or(accumulator, np.eye(size, dtype=bool))
     return tf.constant(accumulator, dtype=tf.float64)
 
 
@@ -622,7 +622,7 @@ def movable_to_updatable(faces, face_movable_vertices):
     if orphaned_count > 0:
         print("Mesh parametrization tools: warning, found orphaned faces in mesh.")
 
-    return np.array(face_updates, dtype=np.bool)
+    return np.array(face_updates, dtype=bool)
 
 
 def connections_to_array(connection_list, dtype=np.float64, inverse=True):
