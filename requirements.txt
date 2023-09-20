@@ -5,3 +5,4 @@ pyvista
 PyQt5
 cumdistf
 pyvistaqt
+quaternionic
