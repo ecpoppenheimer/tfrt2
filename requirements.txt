@@ -4,4 +4,4 @@ scipy
 pyvista
 PyQt5
 cumdistf
-pyvista
+pyvistaqt
