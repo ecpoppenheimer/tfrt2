@@ -63,7 +63,7 @@ class OpticClientWindow(qtw.QWidget):
             print(traceback.format_exc())
 
         # 3D system plot
-        self.plot = pvqt.QtInteractor()
+        self.plot = pvqt.QtInteractor(self)
         self.plot.camera.clipping_range = (.00001, 10000)
         self.plot.add_axes()
 
