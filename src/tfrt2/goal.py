@@ -363,7 +363,7 @@ class CPlaneGoal:
             test_goal_cdf_button.clicked.connect(self.try_draw_test_goal_cdf)
             main_layout.addWidget(test_goal_cdf_button, self.ui_row, 0, 1, 2)
             main_layout.addWidget(cw.SettingsEntryBox(
-                self.settings, "goal_test_point_count", int, qtg.QIntValidator(0, 1e6), self.try_draw_test_goal_cdf
+                self.settings, "goal_test_point_count", int, qtg.QIntValidator(0, int(1e6)), self.try_draw_test_goal_cdf
             ), self.ui_row, 2, 1, 4)
             self.ui_row += 1
 

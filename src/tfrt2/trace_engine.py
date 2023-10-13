@@ -128,6 +128,7 @@ class TraceEngine3D:
             # The system is empty.  Rays have already been cleared, so do nothing
             return
 
+
         active_s, active_hat, active_meta, finished_s, finished_hat, finished_meta, \
             stopped_s, stopped_hat, stopped_meta, dead_s, dead_hat, dead_meta, \
             unfinished_s, unfinished_hat, unfinished_meta = full_trace_loop(

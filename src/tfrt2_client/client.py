@@ -64,8 +64,9 @@ class OpticClientWindow(qtw.QWidget):
 
         # 3D system plot
         self.plot = pvqt.QtInteractor(self)
+        self.plot.background_color=pv.Color((.15, .15, .15))
         self.plot.camera.clipping_range = (.00001, 10000)
-        self.plot.add_axes()
+        self.plot.add_axes(color="white")
 
         # Initialize all manner of base class variables
         self.ui = types.SimpleNamespace()
@@ -73,7 +74,9 @@ class OpticClientWindow(qtw.QWidget):
         self.display_pane = DisplayControls(self)
         self.trace_pane = TraceControls(self)
         self.parameters_pane = ParameterControls(self)
+        self.parameters_pane.setMaximumWidth(self.control_pane_width-16)
         self.components_pane = ComponentControls(self)
+        self.components_pane.setMaximumWidth(self.control_pane_width-16)
         self.remote_pane = RemotePane(self)
         self.optimize_pane = OptimizationPane(self)
         self.ui.pane_stack = None
@@ -120,7 +123,8 @@ class OpticClientWindow(qtw.QWidget):
         # Setup the control layout
         control_layout = qtw.QVBoxLayout()
         control_widget = qtw.QWidget()
-        control_widget.setMaximumWidth(self.control_pane_width)
+        control_widget.setMaximumWidth(self.control_pane_width + 20)
+        control_widget.setSizePolicy(qtw.QSizePolicy.Maximum, qtw.QSizePolicy.Minimum)
         control_widget.setLayout(control_layout)
         main_layout.addWidget(control_widget, 0, 0)
 
@@ -595,7 +599,7 @@ class TraceControls(qtw.QWidget):
 
         # Set up the ray drawer
         parent.settings.establish_defaults(
-            active_set=4,
+            active_set=5,
             trace_depth=3,
             min_wavelength=wavelength.VISIBLE_MIN,
             max_wavelength=wavelength.VISIBLE_MAX
