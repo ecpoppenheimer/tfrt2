@@ -12,7 +12,7 @@ import PyQt5.QtCore as qtc
 
 import tfrt2.tcp_base as tcp
 import tfrt2.trace_engine as engine
-import cumdistf.cdf as cdf
+from cumdistf import cdf, ComputeRequiredError
 
 
 class JobReady(qtc.QObject):
