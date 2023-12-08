@@ -12,7 +12,7 @@ import PyQt5.QtCore as qtc
 
 import tfrt2.tcp_base as tcp
 import tfrt2.trace_engine as engine
-from cumdistf import cdf
+from cumdistf import cdf, ComputeRequiredError
 
 
 class JobReady(qtc.QObject):
@@ -504,7 +504,7 @@ class PerformanceTracer:
             params = [p.numpy() for p in self.optical_system.parameters]
 
             self.server.send_data(tcp.SERVER_SINGLE_STEP, pickle.dumps((finished_rays, params, grad_stats)))
-        except RuntimeError:
+        except cdf.ComputeRequiredError:
             self.nonfatal_error(
                 "single step",
                 "Goal has not had illuminance calculated (available under remote operations)."
