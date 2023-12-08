@@ -508,7 +508,13 @@ class ClientTCPWidget(qtw.QWidget):
         self.files_sent_to_server[remote_filename] = (current_mtime, local_path)
         self.add_sync_task("file_transfer", remote_filename, local_path)
 
-        self.server_socket.write(tcp.CLIENT_FTP, pickle.dumps((remote_filename, Path(local_path).read_bytes())))
+        try:
+            self.server_socket.write(tcp.CLIENT_FTP, pickle.dumps((remote_filename, Path(local_path).read_bytes())))
+        except IsADirectoryError:
+            print(
+                "Sync Error: Tried to copy a file that was a directory.  This can happen when the settings contain a "
+                "blank path that isn't being used.  May need to delete the settings file."
+            )
 
     def toggle_task_pane(self):
         if self.tasks_visible_checkbox.checkState():

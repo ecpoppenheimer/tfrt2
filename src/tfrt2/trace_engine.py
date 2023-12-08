@@ -1051,8 +1051,9 @@ def trace_sample_while_body(
 
     # Select and compile the finished rays
     select_finished = tf.logical_and(valid, tf.equal(intersection_type, TARGET))
+    finished_r = tf.reshape(tf.boolean_mask(ray_r, select_finished), (-1, 1))
     finished_start = tf.concat((finished_start, tf.boolean_mask(working_start, select_finished)), axis=0)
-    finished_hat = tf.concat((finished_hat, tf.boolean_mask(working_hat, select_finished)), axis=0)
+    finished_hat = tf.concat((finished_hat, finished_r * tf.boolean_mask(working_hat, select_finished)), axis=0)
     finished_meta = tf.concat((finished_meta, tf.boolean_mask(working_meta, select_finished)), axis=0)
 
     # Select working rays

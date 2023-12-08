@@ -776,10 +776,12 @@ class CPlaneGoal:
             self.driver.optical_system.targets.append(target)
 
     def get_goal(self, ray_ends, _=None):
-        if self.mode == "None":
-            raise RuntimeError("Goal: Cannot call make_goal / use with an optimizer when in mode 'none'.")
-        else:
-            return self.expand(self.goal(self.flatten(self.project(ray_ends))))
+        with np.printoptions(suppress=True):
+            if self.mode == "None":
+                raise RuntimeError("Goal: Cannot call make_goal / use with an optimizer when in mode 'none'.")
+            else:
+                g = self.expand(self.goal(self.flatten(self.project(ray_ends))))
+                return g
 
     def clear_goal(self):
         try:
